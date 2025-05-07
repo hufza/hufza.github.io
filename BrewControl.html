@@ -282,7 +282,7 @@ $(document).ready(function()
 		xAxis: {
 		  type: 'datetime',
       ordinal:false,
-      min: Date.UTC(2013,02,28),
+      min: Date.UTC(2024,02,28),
 			dateTimeLabelFormats : {
         hour: '%H:%M',
         minute: '%H:%M'
@@ -323,7 +323,7 @@ $(document).ready(function()
         }
 		},    
     series: []
-    //series: [{data:[[getChartDate("2013-06-16T00:32:40Z"),75]]}]      
+    //series: [{data:[[getChartDate("2024-06-16T00:32:40Z"),75]]}]      
 	};
 
 	// add all Channel data to the chart
@@ -404,7 +404,7 @@ function loadChannelHistory(sentChannelIndex,channelNumber,key,sentFieldList,sen
    window.console && console.log('numLoads:',numLoads);
    // get the Channel data with a webservice call
    //$.getJSON('https://www.thingspeak.com/channels/'+channelNumber+'/feed.json?callback=?&amp;offset=0&amp;start=2013-01-20T00:00:00;end='+end+';key='+key, function(data) 
-  	$.getJSON('https://api.thingspeak.com/channels/'+channelNumber+'/feed.json?offset=0start=2013-01-20T00:00:00;end='+end+';api_key='+key, function(data) 
+  	$.getJSON('https://api.thingspeak.com/channels/'+channelNumber+'/feed.json?offset=0start=2024-01-20T00:00:00;end='+end+';api_key='+key, function(data) 
 
    {
 	   // if no access
