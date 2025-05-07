@@ -1,0 +1,1516 @@
+/* BrewCtrl/BrewCtrl_2_01_00.ino
+Pin allocation on Mega. IDE version 1.8.7 with Arduino Mega 2560
+Ethernet W5100 shield. Nextion Ver0.53 w/ 3.2 TouchLCD.
+  D2      PWM SSR-a control via Timer3 and OC3B. SSR DB25
+  D5      PWM SSR-b control via Timer3 and OC3A. MOSFET module to trigger two SSR DB25.
+  D9      OneWire bus for DS18B20. Mini protoboard w 6 connectors.
+  D12     HX711 DOUT on module A. Brown on RJ45. Red e+ Black E- Green A- White A+
+  D13     HX711 SCK on module A. Purple on RJ45.
+  D18     Mega TX1 - Nextion RX yellow
+  D19     Mega RX1 - Nextion TX blue
+  D20     Mega SDA pin for DS3232
+  D21     Mega SCL pin for DS3232
+  D30     HX711 DOUT on module B. Yellow on RJ45. Red e+ Black E- Green A- White A+
+  D31     HX711 SCK on module B. White on RJ45.
+  D34     PWM buzzer contorl
+  D38     HLT valve 220v solenoid. SSR Omron G3MB Channel 1
+  D39     (SSR Omron G3MB Channel 2)
+  D44     Mash pump. MOSFET for 6V from PC power
+For Arduino Mega 2560: timer 3 (controls pin 5, 3, 2)
+ */
+
+// libraries
+//#include <Wire.h>
+#include <SPI.h>
+#include <Ethernet.h>
+#include "ThingSpeak.h"
+#include "Nextion.h"
+#include "PID_v1.h"              // Version 1.1.0
+#include <OneWire.h>             // Version 2.1
+#include <DallasTemperature.h>   // VERSION 3.7.2 BETA
+#include <TimerThree.h>          // Oct 2009
+#include <SimpleTimer.h>         //
+//#include <Time.h>
+#include <DS3232RTC.h>
+#include <HX711_ADC.h>
+
+// declare objects
+/*
+ * Declare a text object [page id:0,component id:1, component name: "t0"]. 
+ * Declare a button object [page id:0,component id:3, component name: "b1"].
+ * Declare a number object [page id:0,component id:3, component name: "n0"]. 
+ * Declare a dual state button object [page id:0,component id:1, component name: "bt0"]. 
+ */
+NexText     pgStart_txtStep1            = NexText(0, 6, "t4");       // Info on Startup page
+NexText     pgStart_txtStep2            = NexText(0, 7, "t5");       // Info on Startup page
+NexText     pgStart_txtStep3            = NexText(0, 8, "t6");       // Info on Startup page
+NexText     pgStart_txtStep4            = NexText(0, 9, "t7");       // Info on Startup page
+
+NexPage     pgPrep                      = NexPage(1, 0, "Prep");
+NexButton   pgPrep_btnMash              = NexButton(1,9, "b4");      // go to Mash page
+NexButton   pgPrep_btnBoil              = NexButton(1,10, "b5");     // go to Boil page
+NexButton   pgPrep_btnCool              = NexButton(1,11, "b6");     // go to Cool page
+NexButton   pgPrep_btnHLTSetP           = NexButton(1,15, "b0");     // Display HLT SetP / go to HLTtemp page
+NexText     pgPrep_txtHLTActualTemp     = NexText(1,12, "t1");       // Display HLT actualTemp on Prep page
+NexText     pgPrep_txtBoilActualTemp    = NexText(1,13, "t3");       // Display Boil actualTemp on Prep page
+NexButton   pgPrep_btnBoilSetP          = NexButton(1,14, "b3");     // Display Boil SetP / go to BoilTemp page
+NexText     pgPrep_txtHLTActualPower    = NexText(1, 1, "t13");      // Display HLT actualPower on Prep page
+NexText     pgPrep_txtBoilActualPower   = NexText(1, 4, "t4");       // Display Boil actualPower on Prep page
+NexDSButton pgPrep_btdsHLTRunStop       = NexDSButton(1, 2, "bt0");  // HLT Run / Stop button on Prep page
+NexButton   pgPrep_btnTimer             = NexButton(1,21, "b7");     // Go to Timer settings page
+NexText     pgPrep_txtTimerHeader       = NexText(1, 22, "t8");      // Display Timer heading on Prep page
+NexText     pgPrep_txtTimerHour         = NexText(1, 23, "t9");      // Display Timer hour on Prep page
+NexText     pgPrep_txtTimerDelimiter    = NexText(1, 24, "t10");     // Display Timer delimiter on Prep page
+NexText     pgPrep_txtTimerMinute       = NexText(1, 25, "t11");     // Display Timer minute on Prep page
+NexText     pgPrep_txtClock             = NexText(1, 28, "t17");     // Display Clock on Prep page
+NexDSButton pgPrep_btdsBoilRunStop      = NexDSButton(1, 3, "bt1");  // Boil Run / Stop button on Prep page
+NexButton   pgPrep_btnHLTActualVol      = NexButton(1, 8, "b1");     // Display HLT Actual Volume / go to HLTvolume page
+
+NexPage     pgMash                      = NexPage(2, 0, "Mash");
+NexButton   pgMash_btnPrep              = NexButton(2,13, "b2");     // go to Prep page
+NexButton   pgMash_btnBoil              = NexButton(2,14, "b5");     // go to Boil page
+NexButton   pgMash_btnCool              = NexButton(2,15, "b6");     // go to Cool page
+NexButton   pgMash_btnHLTActualTemp     = NexButton(2, 9, "b0");     // Display HLT actualTemp / go to HLTtemp page
+NexText     pgMash_txtMashActualTemp    = NexText(2, 1, "t1");       // Display Mash actualTemp on Mash page
+NexText     pgMash_txtBoilActualTemp    = NexText(2, 2, "t3");       // Display Boil actualTemp on Mash page
+NexButton   pgMash_btnBoilSetP          = NexButton(2, 8, "b3");     // Display Boil SetP / go to BoilTemp page
+NexText     pgMash_txtBoilPcTemp        = NexText(2, 28, "t17");     // Indicate Procces control by temp setp
+NexText     pgMash_txtHLTActualPower    = NexText(2, 3, "t13");      // Display HLT actualPower on Mash page
+NexButton   pgMash_btnBoilSetPower      = NexButton(2,19, "b7");     // Display Boil Power SetP / go to BoilPower page
+NexText     pgMash_txtBoilPcPower       = NexText(2, 29, "t18");     // Indicate Procces control by power setp
+NexDSButton pgMash_btdsHLTRunStop       = NexDSButton(2, 4, "bt0");  // HLT Run / Stop button on Mash page
+NexText     pgMash_txtMashOutTemp       = NexText(2,16, "t6");       // Display Mash out temp on Mash page
+NexText     pgMash_txtBoilActualSteam   = NexText(2,18, "t8");       // Display Boil actual Steam temp on Mash page
+NexDSButton pgMash_btdsBoilRunStop      = NexDSButton(2, 5, "bt1");  // Boil Run / Stop button on Mash page
+NexButton   pgMash_btnHLTActualVol      = NexButton(2,12, "b1");     // Display HLT Actual Volume / go to HLTvolume page
+
+NexPage     pgBoil                      = NexPage(3, 0, "Boil");
+NexButton   pgBoil_btnPrep              = NexButton(3,10, "b2");     // go to Prep page
+NexButton   pgBoil_btnMash              = NexButton(3,11, "b4");     // go to Mash page
+NexButton   pgBoil_btnCool              = NexButton(3,12, "b6");     // go to Cool page
+NexButton   pgBoil_btnHLTActualTemp     = NexButton(3, 8, "b0");     // Display HLT actualTemp / go to HLTtemp page
+NexText     pgBoil_txtBoilActualTemp    = NexText(3, 1, "t3");       // Display Boil actualTemp on Boil page
+NexButton   pgBoil_btnBoilSetP          = NexButton(3, 7, "b3");     // Display Boil SetP / go to BoilTemp page
+NexText     pgBoil_txtHLTActualPower    = NexText(3, 2, "t13");      // Display HLT actualPower on Boil page
+NexButton   pgBoil_btnBoilSetPower      = NexButton(3,14, "b7");     // Display Boil Power SetP / go to BoilPower page
+NexDSButton pgBoil_btdsHLTRunStop       = NexDSButton(3, 3, "bt0");  // HLT Run / Stop button on Boil page
+NexText     pgBoil_txtBoilActualSteam   = NexText(3,13, "t8");       // Display Boil actual Steam temp on Boil page
+NexDSButton pgBoil_btdsBoilRunStop      = NexDSButton(3, 4, "bt1");  // Boil Run / Stop button on Boil page
+
+NexPage     pgCool                      = NexPage(4, 0, "Cool");
+NexButton   pgCool_btnPrep              = NexButton(4, 7, "b2");     // go to Prep page
+NexButton   pgCool_btnMash              = NexButton(4, 8, "b4");     // go to Mash page
+NexButton   pgCool_btnBoil              = NexButton(4, 9, "b5");     // go to Boil page
+NexButton   pgCool_btnHLTActualTemp     = NexButton(4, 5, "b0");     // Display HLT actualTemp / go to HLTtemp page
+NexText     pgCool_txtBoilActualTemp    = NexText(4, 1, "t3");       // Display Boil actualTemp on Cool page
+NexText     pgCool_txtHLTActualPower    = NexText(4, 2, "t13");      // Display HLT actualPower on Cool page
+NexText     pgCool_txtBoilActualPower   = NexText(4,14, "t2");       // Display Boil actualPower on Cool page
+NexDSButton pgCool_btdsHLTRunStop       = NexDSButton(4, 3, "bt0");  // HLT Run / Stop button on Cool page
+NexText     pgCool_txtBoilActualIn      = NexText(4,16, "t6");       // Display Boil actual in temp on Cool page
+NexText     pgCool_txtBoilActualOut     = NexText(4,10, "t8");       // Display Boil actual out temp on Cool page
+
+NexPage     pgHLTtemp                   = NexPage(5, 0, "HLTtemp");
+NexButton   pgHLTtemp_btnBack           = NexButton(5, 1, "b0");     // go back to calling page
+NexText     pgHLTtemp_txtHLTSetP        = NexText(5,10, "t1");       // Display HLT SetP on HLTtemp page
+NexText     pgHLTtemp_txtHLTActualTemp  = NexText(5,18, "t8");       // Display HLT actualTemp on HLTtemp page
+NexText     pgHLTtemp_txtHLTActualPower = NexText(5,15, "t6");       // Display HLT actualPower on HLTtemp page
+NexNumber   pgHLTtemp_numHLTSetP        = NexNumber(5, 9, "n0");     // Display HLT SetP on HLTtemp page
+
+NexPage     pgBoilTemp                     = NexPage(6, 0, "BoilTemp");
+NexButton   pgBoilTemp_btnBack             = NexButton(6, 1, "b0");     // go back to calling page
+NexText     pgBoilTemp_txtBoilSetP         = NexText(5,16, "t7");       // Display Boil SetP on BoilTtemp page
+NexText     pgBoilTemp_txtBoilActualTemp   = NexText(6,16, "t8");       // Display Boil actualTemp on BoilTemp page
+NexText     pgBoilTemp_txtBoilActualPower  = NexText(6,13, "t6");       // Display Boil actualPower on BoilTemp page
+NexNumber   pgBoilTemp_numBoilSetP         = NexNumber(5,16, "n0");     // Display Boil SetP on BoilTemp page
+
+NexPage     pgBoilPower                    = NexPage(7, 0, "BoilPower");
+NexButton   pgBoilPower_btnBack            = NexButton(7, 1, "b0");     // go back to calling page
+NexText     pgBoilPower_txtBoilPowerSetP   = NexText(7,17, "t7");       // Display Boil Power SetP on BoilPower page
+NexText     pgBoilPower_txtBoilActualTemp  = NexText(7, 18, "t8");      // Display Boil actualTemp on BoilPower page
+NexText     pgBoilPower_txtBoilActualPower = NexText(7,13, "t6");       // Display Boil actualPower on BoilPower page
+NexNumber   pgBoilPower_numBoilPowerSetP   = NexNumber(7,7, "n2");        // Display Boil Power SetP on BoilPower page
+
+NexPage     pgHLTvolum                  = NexPage(8, 0, "HLTvolum");
+NexButton   pgHLTvolum_btnBack          = NexButton(8, 2, "b0");     // go back to calling page
+NexText     pgHLTvolum_txtHLTLowLevel   = NexText(8,21, "t8");       // Display HLT Low Level SetP on HLTvolum page
+NexNumber   pgHLTvolum_numHLTLowLevel   = NexNumber(8,16, "n0");     // Display HLT Low Level SetP on HLTvolum page
+NexText     pgHLTvolum_txtHLTHighLevel  = NexText(8,1, "t9");        // Display HLT High Level SetP on HLTvolum page
+NexNumber   pgHLTvolum_numHLTHighLevel  = NexNumber(8,17, "n1");     // Display HLT High Level SetP on HLTvolum page
+
+NexPage     pgTimer                     = NexPage(10, 0, "Timer");
+NexButton   pgTimer_btnOk               = NexButton(10,16, "b6");     // Save and go back to calling page
+NexButton   pgTimer_btnBack             = NexButton(10, 3, "b2");     // Cancel and go back to calling page
+NexText     pgTimer_txtTimerHour        = NexText(10,14, "t0");       // Display Hour on Timer page
+NexNumber   pgTimer_numTimerHour        = NexNumber(10,12, "n0");     // Display Hour on Timer page
+NexNumber   pgTimer_numTimerMin         = NexNumber(10,13, "n1");     // Display Minute on Timer page
+NexText     pgTimer_txtTimerMin         = NexText(10,15, "t3");       // Display Minute on Timer page
+NexText     pgTimer_txtClockHour        = NexText(10,9, "t5");        // Display Hour on Timer page
+NexText     pgTimer_txtClockMin         = NexText(10,8, "t4");        // Display Minute on Timer page
+
+SimpleTimer timer;
+
+// variables:
+char buffer[100] = {0};             // Buffer for conversion .setText
+double sensorValue[6];              // actual DS18B20/MAX sensor value
+double hltSet = 93;                 // set point for pid
+double boilSet = 10;                // set point for pid
+double boilPower = 10;              // fixed set point for boiler power (no pid)
+double currentSetP = 69;            // set point for pid
+double hltOutput;                   // define variables for the PID
+double boilOutput;                  // define variables for the PID
+boolean mashPump = false;           // on-off state for pump
+boolean reqTemp = true;             // swap request or read temperature probes
+boolean runningHLT = false;         // on-off state for HLT, execute the pid control or only do logging
+boolean runningBoil = false;        // on-off state for Boil, execute the pid control or only do logging
+boolean staticBoil = false;         // on-off state for static Boil power (no pid), execute pwm power or only do logging
+int selectClockHour = 12;           // Timed running at this hour
+int selectClockMinute = 35;         // Timed running at this minute
+boolean timedRunning = false;       // on-off state for timed alarmclock switch of running to true
+boolean setTimedRunning = false;    // on-off state for timed alarmclock switch of running to true
+byte stateActive = 5;               // will contain the current process state within the control flow diagram
+int current_page = 0;               // Current page number of Nextion display
+int prev_page = 0;                  // Previous page number of Nextion display, enables return
+unsigned long displayTime;          // state machine time variable for updating display
+unsigned long sensorTime;           // state machine time variable for reading sensors
+unsigned long sendingTime;          // state machine time variable for sending values to ThingSpeak
+unsigned long pwmDutyChangeTime;    // state machine time variable for updating pwm duty cycle
+unsigned long readHx711Time;        // state machine time variable for updating smoothed load cell values
+unsigned long StartAutoRunTime;     // time variable for auto cycle start time
+int numberOfDevices;                // Number of oneWire devices found
+double hltLevel = 0;                // water level of HLT in liter
+int hltLow = 8;                     // water low level of HLT, in liter.
+int hltHigh = 10;                   // water high level of HLT, in liter.
+boolean hltCriticalLevel = false;   // HLT critical water level, constant alarm signal & power off 
+int timerHltBeep;                   // SimpleTimer Id
+int timerHltLowLevelCheck;          // SimpleTimer Id
+int timerHltLeveling;               // SimpleTimer Id
+boolean networkOk = false;          // status for network connection
+byte mac[] = { 0x00, 0xAA, 0xBB, 0x1C, 0xDE, 0x02 }; // Enter a MAC address for your controller.
+unsigned long myChannelNumber = 677284; // Thingspeek channel
+float calValue_1 = 700;             // dummy value, multiMap used to map sensor reading vs actual level
+float calValue_2 = 700;             // dummy value, multiMap used to map sensor reading vs actual level
+long tareValue_1 = 50000000;        // dummy value, multiMap used to map sensor reading vs actual level
+long tareValue_2 = 50000000;        // dummy value, multiMap used to map sensor reading vs actual level
+
+// constants
+#define VERINFO "2.1.0"
+const byte pagePrep = 1;          // Nextion Prep menu page
+const byte pageMash = 2;          // Nextion Mash menu page
+const byte pageBoil = 3;          // Nextion Boil menu page
+const byte pageCool = 4;          // Nextion Cool menu page
+const byte pageHLTtemp = 5;       // Nextion HLT temp setting page
+const byte pageBoilTemp = 6;      // Nextion Boil temp setting page
+const byte pageBoilPower = 7;     // Nextion Boil power setting page
+const byte pageHLTvolum = 8;      // Nextion HLT volum setting page
+const byte pageNetworkInfo = 9;   // Nextion Network info page
+const byte pageTimer = 10;        // Nextion Timer setting page
+const byte pageClock = 11;        // Nextion Clock setting page
+const byte viewHltD = 20;         // View type for HLT details
+const uint8_t pin_PWM_a = 2;      // Digital I/O pin number for PWM signal to SSR-a
+const uint8_t pin_PWM_b = 5;      // Digital I/O pin number for PWM signal to SSR-b
+const uint8_t pin_hx711Adt = 12;  // Digital I/O pin number for 1st HX711, DOUT pin
+const uint8_t pin_hx711Asck = 13; // Digital I/O pin number for 1st HX711, SCK pin
+const uint8_t pin_hx711Bdt = 30;  // Digital I/O pin number for 2nd HX711, DOUT pin
+const uint8_t pin_hx711Bsck = 31; // Digital I/O pin number for 2nd HX711, SCK pin
+const uint8_t pin_BUZZER = 34;    // Digital I/O pin number for buzzer
+const uint8_t pin_HltValve = 38;  // Digital I/O pin number for HLT valve
+const uint8_t pin_PUMP = 44;      // Digital I/O pin number for pump
+#define PWMDUTYCHANGE_DELAY 100   // interval in ms for updating pwm duty cycle
+#define TIMER_PERIOD 1000000      // Timer3 period. 100000=100 milli second. 3000000=3s
+#define DISPLAY_DELAY 900         // interval in ms for updating display
+#define SENSOR_DELAY 500          // interval in ms for reading OneWire sensors
+#define HX711_DELAY 2000          // interval in ms for reading HX711 sensors
+#define SENDING_DELAY 20000       // interval in ms for sending values to Thingspeek
+#define LOWLEVELCHECK_DELAY 4000  // interval in ms for HLT low level check
+#define HLTLEVEL_DELAY 2000       // interval in ms for check and open or close HLT valve
+#define PID_LIMIT 1023            // output limit for the PID, same range as timer3 pwm duty cycle
+#define PARAM_KP 400              // PID parameter Kp
+#define PARAM_KI 25               // PID parameter Ki
+#define PARAM_KD 100              // PID parameter Kd
+/*  The Ziegler-Nichols Tuning Rule Table
+ *  Termaks test3: Kp=15.6 Ki=0,39 Kd=156 (L=20 T=260)
+ *  Termaks test2: Kp=9.6 Ki=0,16 Kd=144 (L=30 T=240)
+ *  Termaks test1: Kp=36 Ki=1,8 Kd=180 (L=10 T=300)
+ *  L=20 T=500: Kp=30 Ki=0,75 Kd=300
+ *  Brewkettle 100L: Kp=36 Ki=1,8 Kd=180
+ *  Pizzaovn 900x900: Kp=50 Ki=0,1 Kd=25
+ */ 
+#define HLT 0                     // Sensor index, Hot Liquor Tank, Fixed dip tube
+#define BOIL_1 1                  // sensor index, Boil kettle, Side wall outside
+#define MASH_1 2                  // sensor index, Mash tun, Free dip tube
+#define MASH_2 3                  // sensor index, Mash tun, Bottom cross outlet, Fixed dip tube
+#define BOIL_3 4                  // sensor index, Boil kettle, Top cross outlet, Fixed dip tube
+#define COLDW 5                   // sensor index, Cold water supply, Tube outsie
+//#define BOIL_2 2                  // sensor index, Boil kettle, Free dip tube
+#define ONE_WIRE_BUS 9            // data wire on pin D4
+#define TEMPERATURE_PRECISION 11  // oneWire DS18B20 10-bit precision
+#define PCO_BLACK 0               // Nextion text component color
+#define PCO_RED 63488             // Nextion text component color
+#define PCO_GRAY 46518            // Nextion text component color
+#define xRREF 430.0               // The value of the Rref resistor. Use 430.0!
+const char * myWriteAPIKey = "000000000KR5DP"; // Thingspeek write api key
+#define HLT_LEVEL_BEEP 7          // Hlt level in L to set off beeper alarm
+#define HLT_LEVEL_CUTPOWER 6      // Hlt level in L to cut off power
+const byte numberOfSensors = 6;   // Number of oneWire temperature devices
+DeviceAddress sensorAdr[]=
+  {
+    { 0x28, 0x84, 0xF3, 0x33, 0x04, 0x00, 0x00, 0x9E },  // HTL     (Mouse cable)
+    { 0x28, 0xBF, 0x23, 0x84, 0x04, 0x00, 0x00, 0xC2 },  // Boil_1
+    { 0x28, 0x85, 0x1E, 0x12, 0x04, 0x00, 0x00, 0x60 },  // Mash_1  (Belden cabel w/short dip tube)
+    { 0x28, 0x34, 0x86, 0x2B, 0x04, 0x00, 0x00, 0x02 },  // Mash_2  (SS in mash tun cross outlet)
+    { 0x28, 0x08, 0x32, 0xEA, 0x03, 0x00, 0x00, 0x0E },  // Boil_3  (SS in boiler tee outlet)
+    { 0x28, 0xD8, 0x2A, 0x1B, 0x04, 0x00, 0x00, 0x0C }   // ColdW
+};
+
+//    { 0x28, 0x6D, 0x28, 0x1B, 0x04, 0x00, 0x00, 0x63 },  // Boil_2  (Belden cabel w/long dip tube)
+    
+//My calibrated HLT 2x 20kg HX711 sensors
+  // out[] holds the values wanted in dl
+  int out[] = {210,200,190,180,170,160,150,140,130,120,110,100, 90, 80, 70, 60, 50, 40, 30, 20, 10};
+  // in[] holds the measured analogRead() values for defined levels
+  int in[]  = {12932,13016,13099,13183,13266,13350,13433,13517,13600,13684,13768,13851,13935,14018,14102,14185,14269,14352,14436,14519,14603}; //21
+//  int in[]  = {-1600,-1566,-1533,-1500,-1450,-1400,-1300,-1200,-1100,-1000,-900,-800,-700,-600,-500,-400,-300,-200,-100,-50,-1}; //21
+//  int in[]  = {620,645,668,684,701,720,735,750,767,781,798,810,830,845,861,878,894,913,931,952,982}; //21
+
+
+// declare objects
+NexTouch *nex_listen_list[] = 
+{
+    &pgStart_txtStep1,
+    &pgStart_txtStep2,
+    &pgStart_txtStep3,
+    &pgStart_txtStep4,
+    &pgPrep,
+    &pgPrep_btnMash,
+    &pgPrep_btnBoil,
+    &pgPrep_btnCool,
+    &pgPrep_btnHLTSetP,
+    &pgPrep_txtHLTActualTemp,
+    &pgPrep_txtBoilActualTemp,
+    &pgPrep_btnBoilSetP,
+    &pgPrep_txtHLTActualPower,
+    &pgPrep_txtBoilActualPower,
+    &pgPrep_btdsHLTRunStop,
+    &pgPrep_btnTimer,
+    &pgPrep_txtTimerHeader,
+    &pgPrep_txtTimerHour,
+    &pgPrep_txtTimerDelimiter,
+    &pgPrep_txtTimerMinute,
+    &pgPrep_txtClock,
+    &pgPrep_btnHLTActualVol,
+    &pgPrep_btdsBoilRunStop,
+    &pgMash,
+    &pgMash_btnPrep,
+    &pgMash_btnBoil,
+    &pgMash_btnCool,
+    &pgMash_btnHLTActualTemp,
+    &pgMash_txtMashActualTemp,
+    &pgMash_txtBoilActualTemp,
+    &pgMash_btnBoilSetP,
+    &pgMash_txtBoilPcTemp,
+    &pgMash_txtHLTActualPower,
+    &pgMash_btnBoilSetPower,
+    &pgMash_txtBoilPcPower,
+    &pgMash_btdsHLTRunStop,
+    &pgMash_txtMashOutTemp,
+    &pgMash_txtBoilActualSteam,
+    &pgMash_btdsBoilRunStop,
+    &pgMash_btnHLTActualVol,
+    &pgBoil,
+    &pgBoil_btnPrep,
+    &pgBoil_btnMash,
+    &pgBoil_btnCool,
+    &pgBoil_btnHLTActualTemp,
+    &pgBoil_txtBoilActualTemp,
+    &pgBoil_btnBoilSetP,
+    &pgBoil_txtHLTActualPower,
+    &pgBoil_btnBoilSetPower,
+    &pgBoil_btdsHLTRunStop,
+    &pgBoil_txtBoilActualSteam,
+    &pgBoil_btdsBoilRunStop,
+    &pgCool,
+    &pgCool_btnPrep,
+    &pgCool_btnMash,
+    &pgCool_btnBoil,
+    &pgCool_btnHLTActualTemp,
+    &pgCool_txtBoilActualTemp,
+    &pgCool_txtHLTActualPower,
+    &pgCool_txtBoilActualPower,
+    &pgCool_btdsHLTRunStop,
+    &pgCool_txtBoilActualIn,
+    &pgCool_txtBoilActualOut,
+    &pgHLTtemp,
+    &pgHLTtemp_btnBack,
+    &pgHLTtemp_txtHLTActualTemp,
+    &pgHLTtemp_txtHLTSetP,
+    &pgHLTtemp_numHLTSetP,
+    &pgHLTtemp_txtHLTActualPower,
+    &pgBoilTemp,
+    &pgBoilTemp_btnBack,
+    &pgBoilTemp_txtBoilActualPower,
+    &pgBoilTemp_txtBoilActualTemp,
+    &pgBoilTemp_txtBoilSetP,
+    &pgBoilTemp_numBoilSetP,
+    &pgBoilPower,
+    &pgBoilPower_btnBack,
+    &pgBoilPower_txtBoilPowerSetP,
+    &pgBoilPower_txtBoilActualTemp,
+    &pgBoilPower_txtBoilActualPower,
+    &pgBoilPower_numBoilPowerSetP,
+    &pgHLTvolum,
+    &pgHLTvolum_btnBack,
+    &pgHLTvolum_txtHLTLowLevel,
+    &pgHLTvolum_txtHLTHighLevel,
+    &pgHLTvolum_numHLTLowLevel,
+    &pgHLTvolum_numHLTHighLevel,
+    &pgTimer,
+    &pgTimer_btnOk,
+    &pgTimer_btnBack,
+    &pgTimer_txtTimerHour,
+    &pgTimer_numTimerHour,
+    &pgTimer_numTimerMin,
+    &pgTimer_txtTimerMin,
+    &pgTimer_txtClockHour,
+    &pgTimer_txtClockMin,
+    NULL
+};
+
+// Initialize the Ethernet client library
+// with the IP address and port of the server
+// that you want to connect to (port 80 is default for HTTP):
+EthernetClient client;
+
+PID hltPID(&sensorValue[HLT], &hltOutput, &hltSet, PARAM_KP, PARAM_KI, PARAM_KD, DIRECT);       //Specify the links and initial tuning parameters
+PID boilPID(&sensorValue[BOIL_1], &boilOutput, &boilSet, PARAM_KP, PARAM_KI, PARAM_KD, DIRECT); //Specify the links and initial tuning parameters
+
+OneWire oneWire(ONE_WIRE_BUS);       // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+DallasTemperature sensors(&oneWire); // Pass our oneWire reference to Dallas Temperature.
+
+//HX711 constructor (dout pin, sck pin)
+HX711_ADC LoadCell_1(pin_hx711Adt, pin_hx711Asck); //HX711 1
+HX711_ADC LoadCell_2(pin_hx711Bdt, pin_hx711Bsck); //HX711 2
+
+int multiMap(int val, int* _in, int* _out, uint8_t size)
+{
+  // take care the value is within range
+  // val = constrain(val, _in[0], _in[size-1]);
+  if (val <= _in[0]) return _out[0];
+  if (val >= _in[size-1]) return _out[size-1];
+
+  // search right interval
+  uint8_t pos = 1;  // _in[0] allready tested
+  while(val > _in[pos]) pos++;
+
+  // this will handle all exact "points" in the _in array
+  if (val == _in[pos]) return _out[pos];
+
+  // interpolate in the right segment for the rest
+  return map(val, _in[pos-1], _in[pos], _out[pos-1], _out[pos]);
+}
+
+int freeRam() {
+  extern int __heap_start, *__brkval;
+  int v;
+  return (int) &v - (__brkval ==0 ? (int) &__heap_start : (int) __brkval);
+}
+
+void readSensor(byte i)
+{
+  Serial.println("brewController readsensor");
+  sensors.requestTemperatures(); // Send the command to get temperatures
+  sensorValue[i] = sensors.getTempC(sensorAdr[i]);
+  Serial.println(sensorValue[i]);
+}
+
+void oldreadSensors(void)
+{
+  if ( reqTemp ) {
+    Serial.print("brewController requestTemperatures   ");
+    sensors.setWaitForConversion(false);  // makes it async  
+    sensors.requestTemperatures(); // Send the command to get temperatures
+    sensors.setWaitForConversion(true);
+    reqTemp = false;
+  } else
+  {
+    Serial.print("brewController getTempC   ");
+    for(int i=0;i<numberOfSensors; i++)   // Loop through each device
+    {
+       sensorValue[i] = sensors.getTempC(sensorAdr[i]);
+       Serial.print(sensorValue[i]);
+       Serial.print("   ");
+    }
+    reqTemp = true;
+  }
+  Serial.println(" ");
+}
+
+void readSensors(void)
+{
+  Serial.print("brewController getTempC   ");
+  for(int i=0;i<numberOfSensors; i++)   // Loop through each device
+  {
+     float tempC =  sensors.getTempC(sensorAdr[i]);
+     sensorValue[i] = tempC;
+     Serial.print(sensorValue[i]);
+     Serial.print("   ");
+  }
+  sensors.requestTemperatures(); // Send the command to get temperatures, async mode true
+  Serial.println(" ");
+}
+
+void readHx711Sensors(void)
+{
+    float a = LoadCell_1.getData();
+    float b = LoadCell_2.getData();
+    float c = a+b;
+    hltLevel = multiMap(c, in, out, 21);                 // multiMap arrays are int, multiMap returning level in dL.
+    hltLevel = hltLevel/10;                              // change from dL to L
+/*    dtostrf(hltLevel, 2, 1, buffer);
+    Serial.print("hltLevel [L]: ");
+    Serial.print(buffer);
+    Serial.print("     Load_cell 1 output val: ");
+    Serial.print(a);
+    Serial.print("    Load_cell 2 output val: ");
+    Serial.println(b);  */
+}
+
+void printIPAddress()
+{
+  Serial.print("My IP address: ");
+  for (byte thisByte = 0; thisByte < 4; thisByte++) {
+    // print the value of each byte of the IP address:
+    Serial.print(Ethernet.localIP()[thisByte], DEC);
+    Serial.print(".");
+  }
+  Serial.println();
+}
+
+void writeValues(void) {
+  Serial.println("writeValues");
+
+  dtostrf(sensorValue[HLT], 1, 2, buffer);              ThingSpeak.setField(1,buffer);
+  dtostrf(hltSet, 1, 0, buffer);                        ThingSpeak.setField(2,buffer);
+  if (runningHLT == 0) ThingSpeak.setField(3,102); else ThingSpeak.setField(3,112);
+  dtostrf(hltOutput/10.23, 1, 0, buffer);               ThingSpeak.setField(4,buffer);
+  
+  dtostrf(sensorValue[BOIL_1], 1, 2, buffer);           ThingSpeak.setField(5,buffer);
+  dtostrf(boilSet, 1, 0, buffer);                       ThingSpeak.setField(6,buffer);
+  if (runningBoil == 0) ThingSpeak.setField(7,103); else ThingSpeak.setField(7,113);
+  dtostrf(1+boilOutput/10.23, 1, 0, buffer);              ThingSpeak.setField(8,buffer);
+
+  // Boil_2 Mash_1 Mash_2 Boil_3 ColdW
+
+  ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);  
+}
+
+//==========================================================================================
+//                                Nextion Touchscreen code 
+//==========================================================================================
+
+void pgPrep_btnMashPopCallback(void *ptr) {  
+  current_page=pageMash;
+  pgMash.show();
+}
+
+void pgPrep_btnBoilPopCallback(void *ptr) {
+  current_page=pageBoil;
+  pgBoil.show();
+}
+
+void pgPrep_btnCoolPopCallback(void *ptr) {
+  runningBoil = false;
+  boilPID.SetMode(MANUAL);  boilOutput = 0;    // turn the PID off
+  Timer3.setPwmDuty(pin_PWM_b, 0);           // set the pwm output to off
+  current_page=pageCool;
+  pgCool.show();
+}
+
+void pgPrep_btdsHLTRunStopPopCallback(void *ptr) {
+    uint32_t dual_state;
+    pgPrep_btdsHLTRunStop.getValue(&dual_state);
+    if(dual_state) 
+    {   runningHLT = true;
+        hltPID.SetMode(AUTOMATIC);                  // turn the PID on
+        dtostrf(hltOutput/10.23, 2, 0, buffer);
+        pgPrep_txtHLTActualPower.setText(buffer);
+    } else
+    {   runningHLT = false;
+        hltPID.SetMode(MANUAL);  hltOutput = 0;    // turn the PID off
+        Timer3.setPwmDuty(pin_PWM_a, 0);           // set the pwm output to off
+        pgPrep_txtHLTActualPower.setText("-");   
+    }
+}
+
+void pgPrep_btdsBoilRunStopPopCallback(void *ptr) {
+    uint32_t dual_state;
+    pgPrep_btdsBoilRunStop.getValue(&dual_state);
+    if(dual_state) 
+    {   runningBoil = true;
+        boilPID.SetMode(AUTOMATIC);                  // turn the PID on
+        dtostrf(boilOutput/10.23, 2, 0, buffer);
+        pgPrep_txtBoilActualPower.setText(buffer);
+    } else
+    {   runningBoil = false;
+        boilPID.SetMode(MANUAL);  boilOutput = 0;    // turn the PID off
+        Timer3.setPwmDuty(pin_PWM_b, 0);           // set the pwm output to off
+        pgPrep_txtBoilActualPower.setText("-");   
+    }
+}
+
+void pgMash_btnPrepPopCallback(void *ptr) {
+  current_page=pagePrep;
+  pgPrep.show();
+}
+
+void pgMash_btnBoilPopCallback(void *ptr) {
+  current_page=pageBoil;
+  pgBoil.show();
+}
+
+void pgMash_btnCoolPopCallback(void *ptr) {
+  runningBoil = false;
+  boilPID.SetMode(MANUAL);  boilOutput = 0;    // turn the PID off
+  Timer3.setPwmDuty(pin_PWM_b, 0);           // set the pwm output to off
+  current_page=pageCool;
+  pgCool.show();
+}
+
+void pgMash_btdsHLTRunStopPopCallback(void *ptr) {
+    uint32_t dual_state;
+    pgMash_btdsHLTRunStop.getValue(&dual_state);
+    if(dual_state) 
+    {   runningHLT = true;
+        hltPID.SetMode(AUTOMATIC);                  // turn the PID on
+        dtostrf(hltOutput/10.23, 2, 0, buffer);
+        pgMash_txtHLTActualPower.setText(buffer);
+    } else
+    {   runningHLT = false;
+        hltPID.SetMode(MANUAL);  hltOutput = 0;    // turn the PID off
+        Timer3.setPwmDuty(pin_PWM_a, 0);           // set the pwm output to off
+        pgMash_txtHLTActualPower.setText("-");   
+    }
+}
+
+void pgMash_btdsBoilRunStopPopCallback(void *ptr) {
+    uint32_t dual_state;
+    pgMash_btdsBoilRunStop.getValue(&dual_state);
+    if(dual_state) 
+    {   runningBoil = true;
+        boilPID.SetMode(AUTOMATIC);                  // turn the PID on
+        dtostrf(boilOutput/10.23, 2, 0, buffer);
+        pgMash_btnBoilSetPower.setText(buffer);
+    } else
+    {   runningBoil = false;
+        boilPID.SetMode(MANUAL);  boilOutput = 0;    // turn the PID off
+        Timer3.setPwmDuty(pin_PWM_b, 0);           // set the pwm output to off
+        pgMash_btnBoilSetPower.setText("-");   
+    }
+}
+
+void pgBoil_btnPrepPopCallback(void *ptr) {
+  current_page=pagePrep;
+  pgPrep.show();
+}
+
+void pgBoil_btnMashPopCallback(void *ptr) {
+  current_page=pageMash;
+  pgMash.show();
+}
+
+void pgBoil_btnCoolPopCallback(void *ptr) {
+  runningBoil = false;
+  boilPID.SetMode(MANUAL);  boilOutput = 0;    // turn the PID off
+  Timer3.setPwmDuty(pin_PWM_b, 0);           // set the pwm output to off
+  current_page=pageCool;
+  pgCool.show();
+}
+
+void pgBoil_btdsHLTRunStopPopCallback(void *ptr) {
+    uint32_t dual_state;
+    pgBoil_btdsHLTRunStop.getValue(&dual_state);
+    if(dual_state) 
+    {   runningHLT = true;
+        hltPID.SetMode(AUTOMATIC);                  // turn the PID on
+        dtostrf(hltOutput/10.23, 2, 0, buffer);
+        pgBoil_txtHLTActualPower.setText(buffer);
+    } else
+    {   runningHLT = false;
+        hltPID.SetMode(MANUAL);  hltOutput = 0;    // turn the PID off
+        Timer3.setPwmDuty(pin_PWM_a, 0);           // set the pwm output to off
+        pgBoil_txtHLTActualPower.setText("-");   
+    }
+}
+
+void pgBoil_btdsBoilRunStopPopCallback(void *ptr) {
+    uint32_t dual_state;
+    pgBoil_btdsBoilRunStop.getValue(&dual_state);
+    if(dual_state) 
+    {   runningBoil = true;
+        boilPID.SetMode(AUTOMATIC);                  // turn the PID on
+        dtostrf(boilOutput/10.23, 2, 0, buffer);
+        pgBoil_btnBoilSetPower.setText(buffer);
+    } else
+    {   runningBoil = false;
+        boilPID.SetMode(MANUAL);  boilOutput = 0;    // turn the PID off
+        Timer3.setPwmDuty(pin_PWM_b, 0);           // set the pwm output to off
+        pgBoil_btnBoilSetPower.setText("-");   
+    }
+}
+
+void pgCool_btnPrepPopCallback(void *ptr) {
+  current_page=pagePrep;
+  pgPrep.show();
+}
+
+void pgCool_btnMashPopCallback(void *ptr) {
+  current_page=pageMash;
+  pgMash.show();
+}
+
+void pgCool_btnBoilPopCallback(void *ptr) {
+  current_page=pageBoil;
+  pgBoil.show();
+}
+
+void pgCool_btdsHLTRunStopPopCallback(void *ptr) {
+    uint32_t dual_state;
+    pgCool_btdsHLTRunStop.getValue(&dual_state);
+    if(dual_state) 
+    {   runningHLT = true;
+        hltPID.SetMode(AUTOMATIC);                  // turn the PID on
+        dtostrf(hltOutput/10.23, 2, 0, buffer);
+        pgCool_txtHLTActualPower.setText(buffer);
+    } else
+    {   runningHLT = false;
+        hltPID.SetMode(MANUAL);  hltOutput = 0;    // turn the PID off
+        Timer3.setPwmDuty(pin_PWM_a, 0);           // set the pwm output to off
+        pgCool_txtHLTActualPower.setText("-");   
+    }
+}
+
+void pgPrep_btnHLTSetPPopCallback(void *ptr) {
+  prev_page=pagePrep;
+  current_page=pageHLTtemp;
+  pgHLTtemp.show();
+  dtostrf(hltSet, 2, 0, buffer);
+  pgHLTtemp_txtHLTSetP.setText(buffer);
+  pgHLTtemp_numHLTSetP.setValue(hltSet);
+}
+void pgMash_btnHLTActualTempPopCallback(void *ptr) {
+  prev_page=pageMash;
+  current_page=pageHLTtemp;
+  pgHLTtemp.show();
+  dtostrf(hltSet, 2, 0, buffer);
+  pgHLTtemp_txtHLTSetP.setText(buffer);
+  pgHLTtemp_numHLTSetP.setValue(hltSet);
+}
+void pgBoil_btnHLTActualTempPopCallback(void *ptr) {
+  prev_page=pageBoil;
+  current_page=pageHLTtemp;
+  pgHLTtemp.show();
+  dtostrf(hltSet, 2, 0, buffer);
+  pgHLTtemp_txtHLTSetP.setText(buffer);
+  pgHLTtemp_numHLTSetP.setValue(hltSet);
+}
+void pgCool_btnHLTActualTempPopCallback(void *ptr) {
+  prev_page=pageCool;
+  current_page=pageHLTtemp;
+  pgHLTtemp.show();
+  dtostrf(hltSet, 2, 0, buffer);
+  pgHLTtemp_txtHLTSetP.setText(buffer);
+  pgHLTtemp_numHLTSetP.setValue(hltSet);
+}
+
+void pgPrep_btnBoilSetPPopCallback(void *ptr) {
+  prev_page=pagePrep;
+  current_page=pageBoilTemp;
+  pgBoilTemp.show();
+  dtostrf(boilSet, 2, 0, buffer);
+  pgBoilTemp_txtBoilSetP.setText(buffer);
+  pgBoilTemp_numBoilSetP.setValue(boilSet);
+}
+
+void pgMash_btnBoilSetPPopCallback(void *ptr) {
+  prev_page=pageMash;
+  current_page=pageBoilTemp;
+  pgBoilTemp.show();
+  dtostrf(boilSet, 2, 0, buffer);
+  pgBoilTemp_txtBoilSetP.setText(buffer);
+  pgBoilTemp_numBoilSetP.setValue(boilSet);
+}
+
+void pgBoil_btnBoilSetPPopCallback(void *ptr) {
+  prev_page=pageBoil;
+  current_page=pageBoilTemp;
+  pgBoilTemp.show();
+  dtostrf(boilSet, 2, 0, buffer);
+  pgBoilTemp_txtBoilSetP.setText(buffer);
+  pgBoilTemp_numBoilSetP.setValue(boilSet);
+}
+
+void pgMash_btnBoilSetPowerPopCallback(void *ptr) {
+  prev_page=pageMash;
+  current_page=pageBoilPower;
+  pgBoilPower.show();
+  dtostrf(boilPower, 2, 0, buffer);
+  pgBoilPower_txtBoilPowerSetP.setText(buffer);
+  pgBoilPower_numBoilPowerSetP.setValue(boilPower);
+}
+
+void pgBoil_btnBoilSetPowerPopCallback(void *ptr) {
+  prev_page=pageBoil;
+  current_page=pageBoilPower;
+  pgBoilPower.show();
+  dtostrf(boilPower, 2, 0, buffer);
+  pgBoilPower_txtBoilPowerSetP.setText(buffer);
+  pgBoilPower_numBoilPowerSetP.setValue(boilPower);
+}
+
+void pgPrep_btnHLTActualVolPopCallback(void *ptr) { 
+  prev_page=pagePrep;
+  current_page=pageHLTvolum;
+  pgHLTvolum.show();
+  dtostrf(hltLow, 2, 0, buffer);
+  pgHLTvolum_txtHLTLowLevel.setText(buffer);
+  pgHLTvolum_numHLTLowLevel.setValue(hltLow);
+  dtostrf(hltHigh, 2, 0, buffer);
+  pgHLTvolum_txtHLTHighLevel.setText(buffer);
+  pgHLTvolum_numHLTHighLevel.setValue(hltHigh);
+}
+
+void pgMash_btnHLTActualVolPopCallback(void *ptr) {
+  prev_page=pageMash;
+  current_page=pageHLTvolum;
+  pgHLTvolum.show();
+  dtostrf(hltLow, 2, 0, buffer);
+  pgHLTvolum_txtHLTLowLevel.setText(buffer);
+  pgHLTvolum_numHLTLowLevel.setValue(hltLow);
+  dtostrf(hltHigh, 2, 0, buffer);
+  pgHLTvolum_txtHLTHighLevel.setText(buffer);
+  pgHLTvolum_numHLTHighLevel.setValue(hltHigh);
+}
+
+void pgPrep_btnTimerPopCallback(void *ptr) {
+  prev_page=pagePrep;
+  current_page=pageTimer;
+  pgTimer.show();
+  timedRunning=false;
+  pgTimer_numTimerHour.setValue(hour());
+  dtostrf(hour(), 2, 0, buffer);
+  pgTimer_txtClockHour.setText(buffer);
+  pgTimer_txtTimerHour.setText(buffer);
+  pgTimer_numTimerMin.setValue(minute());
+  dtostrf(minute(), 2, 0, buffer);
+  pgTimer_txtClockMin.setText(buffer);
+  pgTimer_txtTimerMin.setText(buffer);
+}
+
+void pgHLTtemp_btnBackPopCallback(void *ptr) {
+  memset(&buffer[0], 0, sizeof(buffer));
+  pgHLTtemp_txtHLTSetP.getText(buffer, sizeof(buffer));
+  Serial.print(" Dbg2 buffer:"); Serial.print(buffer);
+  hltSet=atof(buffer);
+  Serial.print(" Dbg3 hltSet:"); Serial.print(hltSet);
+  current_page=prev_page;
+  prev_page=pageHLTtemp;
+  Serial.print("Dbg4 going to page:"); Serial.print(current_page);
+    switch(current_page) {
+      case pagePrep:
+        pgPrep.show();
+      break;
+      case pageMash:
+        pgMash.show();
+      break;
+      case pageBoil:
+        pgBoil.show();
+      break;
+      case pageCool:
+        pgCool.show();
+      break;
+    }
+  Serial.println(" dbg end.");
+}
+
+void pgBoilTemp_btnBackPopCallback(void *ptr) {
+  memset(&buffer[0], 0, sizeof(buffer));
+  pgBoilTemp_txtBoilSetP.getText(buffer, sizeof(buffer));
+  Serial.print(" Dbg2 buffer:"); Serial.print(buffer);
+  boilSet=atof(buffer);
+  Serial.print(" Dbg3 boilSet:"); Serial.print(boilSet);
+  current_page=prev_page;
+  prev_page=pageBoilTemp;
+  staticBoil = false;
+  Serial.print("Dbg4 going to page:"); Serial.print(current_page);
+    switch(current_page) {
+      case pagePrep:
+        pgPrep.show();
+      break;
+      case pageMash:
+        pgMash.show();
+      break;
+      case pageBoil:
+        pgBoil.show();
+      break;
+      case pageCool:
+        pgCool.show();
+      break;
+    }
+  Serial.println(" dbg end.");
+}
+
+void pgBoilPower_btnBackPopCallback(void *ptr) {
+  memset(&buffer[0], 0, sizeof(buffer));
+  pgBoilPower_txtBoilPowerSetP.getText(buffer, sizeof(buffer));
+  Serial.print(" Dbg2 buffer:"); Serial.print(buffer);
+  boilPower=atof(buffer);
+  Serial.print(" Dbg3 boilPower:"); Serial.print(boilPower);
+  current_page=prev_page;
+  prev_page=pageBoilPower;
+  staticBoil = true;
+  Serial.print("Dbg4 going to page:"); Serial.print(current_page);
+    switch(current_page) {
+      case pagePrep:
+        pgPrep.show();
+      break;
+      case pageMash:
+        pgMash.show();
+      break;
+      case pageBoil:
+        pgBoil.show();
+      break;
+      case pageCool:
+        pgCool.show();
+      break;
+    }
+  Serial.println(" dbg end.");
+}
+
+void pgHLTvolum_btnBackPopCallback(void *ptr) {
+  memset(&buffer[0], 0, sizeof(buffer));
+  pgHLTvolum_txtHLTLowLevel.getText(buffer, sizeof(buffer));
+  Serial.print(" Dbg5 buffer:"); Serial.print(buffer);
+  hltLow=atof(buffer);
+  Serial.print(" Dbg hltLow:"); Serial.print(hltLow);
+  memset(&buffer[0], 0, sizeof(buffer));
+  pgHLTvolum_txtHLTHighLevel.getText(buffer, sizeof(buffer));
+  Serial.print(" Dbg buffer:"); Serial.print(buffer);
+  hltHigh=atof(buffer);
+  Serial.print(" Dbg hltHigh:"); Serial.print(hltHigh);
+  current_page=prev_page;
+  prev_page=pageBoilTemp;
+  Serial.print("Dbg going to page:"); Serial.print(current_page);
+    switch(current_page) {
+      case pagePrep:
+        pgPrep.show();
+      break;
+      case pageMash:
+        pgMash.show();
+      break;
+      case pageBoil:
+        pgBoil.show();
+      break;
+      case pageCool:
+        pgCool.show();
+      break;
+    }
+  Serial.println(" dbg end.");
+}
+
+void pgTimer_btnOkPopCallback(void *ptr) {
+  memset(&buffer[0], 0, sizeof(buffer));
+  pgTimer_txtTimerHour.getText(buffer, sizeof(buffer));
+  Serial.print(" Dbg3 buffer:"); Serial.print(buffer);
+  selectClockHour=atof(buffer);
+  Serial.print(" Dbga selectClockHour:"); Serial.print(selectClockHour);
+  memset(&buffer[0], 0, sizeof(buffer));
+  pgTimer_txtTimerMin.getText(buffer, sizeof(buffer));
+  Serial.print(" Dbg buffer:"); Serial.print(buffer);
+  selectClockMinute=atof(buffer);
+  Serial.print(" Dbg selectClockMinute:"); Serial.print(selectClockMinute);
+  current_page=prev_page;
+  prev_page=pageTimer;
+  timedRunning=true;
+  Serial.print("Dbg going to page:"); Serial.print(current_page);
+    switch(current_page) {
+      case pagePrep:
+        pgPrep.show();
+      break;
+      case pageMash:
+        pgMash.show();
+      break;
+      case pageBoil:
+        pgBoil.show();
+      break;
+      case pageCool:
+        pgCool.show();
+      break;
+    }
+  Serial.println(" dbg end.");
+}
+
+void pgTimer_btnBackPopCallback(void *ptr) {
+  current_page=prev_page;
+  prev_page=pageTimer;
+  timedRunning=false;
+  Serial.print("Dbg4 going to page:"); Serial.print(current_page);
+    switch(current_page) {
+      case pagePrep:
+        pgPrep.show();
+      break;
+      case pageMash:
+        pgMash.show();
+      break;
+      case pageBoil:
+        pgBoil.show();
+      break;
+      case pageCool:
+        pgCool.show();
+      break;
+    }
+  Serial.println(" dbg end.");
+}
+
+void updateHmiDisplay()
+{
+    Serial.print("Dbg1 current_page:"); Serial.print(current_page);
+    Serial.print(" prev_page:"); Serial.print(prev_page);
+    Serial.print(" runningHLT:"); Serial.print(runningHLT);
+    Serial.print(" hltSet:"); Serial.print(hltSet);
+    Serial.print(" hltLevel:"); Serial.print(hltLevel);
+    Serial.print(" runningBoil:"); Serial.print(runningBoil);
+    Serial.print(" boilSet:"); Serial.print(boilSet);
+    Serial.print(" boilOutput:"); Serial.print(boilOutput);
+    //Serial.println(" lineshift dbg....");
+    //Serial.print(" HLT:"); Serial.print(sensorValue[HLT]);
+    Serial.print(" MASH_1:"); Serial.print(sensorValue[MASH_1]);
+    //Serial.print(" BOIL_2:"); Serial.print(sensorValue[BOIL_2]);
+    //Serial.print(" BOIL_1:"); Serial.print(sensorValue[BOIL_1]);
+    Serial.print(" MASH_2:"); Serial.print(sensorValue[MASH_2]);
+    //Serial.print(" BOIL_3:"); Serial.print(sensorValue[BOIL_3]);
+    Serial.println(" dbg end.");
+    switch(current_page) {
+      case pagePrep:
+        dtostrf(hltSet, 2, 0, buffer);                pgPrep_btnHLTSetP.setText(buffer);
+        dtostrf(sensorValue[HLT], 2, 0, buffer);      pgPrep_txtHLTActualTemp.setText(buffer);
+        dtostrf(sensorValue[BOIL_1], 2, 0, buffer);   pgPrep_txtBoilActualTemp.setText(buffer);
+        dtostrf(boilSet, 2, 0, buffer);               pgPrep_btnBoilSetP.setText(buffer);
+        if(runningHLT) {
+          dtostrf(hltOutput/10.23, 2, 0, buffer);    pgPrep_txtHLTActualPower.setText(buffer);
+          pgPrep_btdsHLTRunStop.setValue(1);
+        } else { 
+          pgPrep_txtHLTActualPower.setText("-");
+          pgPrep_btdsHLTRunStop.setValue(0); }
+        if(runningBoil) {
+          dtostrf(boilOutput/10.23, 2, 0, buffer);   pgPrep_txtBoilActualPower.setText(buffer);
+          pgPrep_btdsBoilRunStop.setValue(1);
+        } else { 
+          pgPrep_txtBoilActualPower.setText("-");
+          pgPrep_btdsBoilRunStop.setValue(0); }
+        if(!timedRunning) {
+          pgPrep_txtTimerHeader.Set_font_color_pco(PCO_GRAY);
+          pgPrep_txtTimerHour.Set_font_color_pco(PCO_GRAY);
+          pgPrep_txtTimerDelimiter.Set_font_color_pco(PCO_GRAY);
+          pgPrep_txtTimerMinute.Set_font_color_pco(PCO_GRAY);
+          pgPrep_txtClock.Set_font_color_pco(PCO_GRAY);
+        } else {
+          dtostrf(selectClockHour, 2, 0, buffer);
+          pgPrep_txtTimerHour.setText(buffer);
+          dtostrf(selectClockMinute, 2, 0, buffer);
+          pgPrep_txtTimerMinute.setText(buffer);
+          pgPrep_txtTimerHeader.Set_font_color_pco(PCO_RED);
+          pgPrep_txtTimerHour.Set_font_color_pco(PCO_RED);
+          pgPrep_txtTimerDelimiter.Set_font_color_pco(PCO_RED);
+          pgPrep_txtTimerMinute.Set_font_color_pco(PCO_RED);
+          sprintf(buffer, "%02d:%02d:%02d", hour(),minute(),second());
+          pgPrep_txtClock.setText(buffer);
+          pgPrep_txtClock.Set_font_color_pco(PCO_BLACK);
+        }
+        dtostrf(hltLevel, 2, 1, buffer);
+        pgPrep_btnHLTActualVol.setText(buffer);
+      break;
+      case pageMash:
+        dtostrf(sensorValue[HLT], 2, 1, buffer);      pgMash_btnHLTActualTemp.setText(buffer);
+        dtostrf(sensorValue[MASH_1], 2, 0, buffer);   pgMash_txtMashActualTemp.setText(buffer);
+        dtostrf(sensorValue[BOIL_1], 2, 0, buffer);   pgMash_txtBoilActualTemp.setText(buffer);
+        if(runningHLT) {
+           dtostrf(hltOutput/10.23, 2, 0, buffer);    pgMash_txtHLTActualPower.setText(buffer);
+           pgMash_btdsHLTRunStop.setValue(1); }
+        else { 
+          pgMash_txtHLTActualPower.setText("-");
+          pgMash_btdsHLTRunStop.setValue(0); }
+        if(runningBoil) {
+          pgMash_btdsBoilRunStop.setValue(1); 
+          if(staticBoil) {
+            pgMash_btnBoilSetP.setText("-");
+            dtostrf(boilPower, 2, 0, buffer);
+            pgMash_btnBoilSetPower.setText(buffer);   }
+          else {
+            dtostrf(boilSet, 2, 0, buffer);
+            pgMash_btnBoilSetP.setText(buffer);
+            dtostrf(boilOutput/10.23, 2, 0, buffer);
+            pgMash_btnBoilSetPower.setText(buffer);
+          } }
+        else {
+          pgMash_btdsBoilRunStop.setValue(0);
+          pgMash_btnBoilSetP.setText("-");
+          pgMash_btnBoilSetPower.setText("-"); }
+        if(staticBoil) {
+          pgMash_txtBoilPcTemp.Set_font_color_pco(PCO_GRAY);
+          pgMash_txtBoilPcPower.Set_font_color_pco(PCO_RED); }
+        else {
+          pgMash_txtBoilPcTemp.Set_font_color_pco(PCO_RED);
+          pgMash_txtBoilPcPower.Set_font_color_pco(PCO_GRAY); }
+        dtostrf(sensorValue[MASH_2], 2, 0, buffer);   pgMash_txtMashOutTemp.setText(buffer);
+        dtostrf(sensorValue[BOIL_3], 2, 0, buffer);   pgMash_txtBoilActualSteam.setText(buffer);
+        dtostrf(hltLevel, 2, 1, buffer);
+        pgMash_btnHLTActualVol.setText(buffer);
+      break;
+      case pageBoil:
+        dtostrf(sensorValue[HLT], 2, 1, buffer);      pgBoil_btnHLTActualTemp.setText(buffer);
+        dtostrf(sensorValue[BOIL_1], 2, 1, buffer);   pgBoil_txtBoilActualTemp.setText(buffer);
+        dtostrf(boilSet, 2, 1, buffer);               pgBoil_btnBoilSetP.setText(buffer);
+        if(runningHLT) {
+           dtostrf(hltOutput/10.23, 2, 0, buffer);    pgBoil_txtHLTActualPower.setText(buffer);
+           pgBoil_btdsHLTRunStop.setValue(1);
+        } else { 
+          pgBoil_txtHLTActualPower.setText("-");
+          pgBoil_btdsHLTRunStop.setValue(0); }
+        if(runningBoil) {
+           dtostrf(boilOutput/10.23, 2, 0, buffer);   pgBoil_btnBoilSetPower.setText(buffer);
+           pgBoil_btdsBoilRunStop.setValue(1);
+        } else { 
+          pgBoil_btnBoilSetPower.setText("-");
+          pgBoil_btdsBoilRunStop.setValue(0); }
+        dtostrf(sensorValue[BOIL_3], 2, 1, buffer);   pgBoil_txtBoilActualSteam.setText(buffer);
+      break;
+      case pageCool:
+        dtostrf(sensorValue[HLT], 2, 1, buffer);      pgCool_btnHLTActualTemp.setText(buffer);
+        dtostrf(sensorValue[BOIL_1], 2, 1, buffer);   pgCool_txtBoilActualTemp.setText(buffer);
+        if(runningHLT) {
+           dtostrf(hltOutput/10.23, 2, 0, buffer);    pgCool_txtHLTActualPower.setText(buffer);
+           pgCool_btdsHLTRunStop.setValue(1);
+        } else { 
+          pgCool_txtHLTActualPower.setText("-");
+          pgCool_btdsHLTRunStop.setValue(0); }
+        if(runningBoil) {
+           dtostrf(boilOutput/10.23, 2, 0, buffer);   pgCool_txtBoilActualPower.setText(buffer);
+        } else { 
+          pgCool_txtBoilActualPower.setText("-");
+        }
+        dtostrf(sensorValue[COLDW], 2, 1, buffer);   pgCool_txtBoilActualIn.setText(buffer);
+        dtostrf(sensorValue[BOIL_3], 2, 1, buffer);   pgCool_txtBoilActualOut.setText(buffer);
+      break;
+      case pageHLTtemp:
+        dtostrf(sensorValue[HLT], 2, 1, buffer);   pgHLTtemp_txtHLTActualTemp.setText(buffer);
+        if(runningHLT) {
+          dtostrf(hltOutput/10.23, 2, 0, buffer);  pgHLTtemp_txtHLTActualPower.setText(buffer);
+        } else {
+          pgHLTtemp_txtHLTActualPower.setText("-");
+        }
+      break;
+      case pageBoilTemp:
+        dtostrf(sensorValue[BOIL_1], 2, 1, buffer); pgBoilTemp_txtBoilActualTemp.setText(buffer);
+        if(runningBoil) {
+           dtostrf(boilOutput/10.23, 2, 0, buffer); pgBoilTemp_txtBoilActualPower.setText(buffer);
+        } else { 
+          pgBoilTemp_txtBoilActualPower.setText("-");
+        }
+      break;
+      case pageBoilPower:
+        dtostrf(sensorValue[BOIL_1], 2, 1, buffer); pgBoilPower_txtBoilActualTemp.setText(buffer);
+        if(runningBoil) {
+           dtostrf(boilOutput/10.23, 2, 0, buffer); pgBoilPower_txtBoilActualPower.setText(buffer);
+        } else { 
+          pgBoilPower_txtBoilActualPower.setText("-");
+        }
+      break;
+    }
+}
+
+//==========================================================================================
+//                                HLT level alarm and shutoff code 
+//==========================================================================================
+
+void hltAlarmBeeper() {
+  if (digitalRead(pin_BUZZER)) {
+    digitalWrite(pin_BUZZER, LOW);
+  }
+  else {
+    digitalWrite(pin_BUZZER, HIGH);
+  }  
+}
+
+void hltLowLevelCheck() {
+  Serial.print("Dbg6 runningHLT:"); Serial.print(runningHLT);
+  if (runningHLT) {
+    if (hltLevel < HLT_LEVEL_BEEP) {              // HLT level below beep alarm level
+      Serial.print(" BEEP hltLevel:"); Serial.print(hltLevel);
+      if (hltLevel < HLT_LEVEL_CUTPOWER) {        // HLT level below power cutoff level
+        Serial.print(" CUT hltLevel:"); Serial.print(hltLevel);
+        hltCriticalLevel = true;                  // signal to turn the PID off
+        Serial.print(" hltCriticalLevel:"); Serial.print(hltCriticalLevel);
+        digitalWrite(pin_BUZZER, HIGH);           // Constantly beep
+        timer.disable(timerHltBeep);              // Dont turn off beep
+      }
+      else {
+        hltCriticalLevel = false;                 // signal to let the PID run
+        Serial.print(" hltCriticalLevel:"); Serial.print(hltCriticalLevel);
+        timer.enable(timerHltBeep);               // Periodic beep
+      }
+    }
+    else {
+      hltCriticalLevel = false;                 // signal to let the PID run
+      digitalWrite(pin_BUZZER, LOW);              // No beep
+      Serial.print(" buzzer:"); Serial.print("off");
+      timer.disable(timerHltBeep);                // No beep
+    }  
+  }
+  else {
+    Serial.print(" no beep");
+    digitalWrite(pin_BUZZER, LOW);              // No beep
+  }
+  Serial.println(".");
+}
+
+void hltLeveling() {
+  if (digitalRead(pin_HltValve)) {           // if valve is open
+    if (hltLevel > hltHigh) {                // if HLT level over high level limit
+      digitalWrite(pin_HltValve, LOW);       // close valve
+      Serial.println("close valve");
+    }
+  }
+  if (hltLevel < hltLow) {                   // if HLT level below low level limit
+    digitalWrite(pin_HltValve, HIGH);        // Open valve
+    Serial.println("open valve");
+  }
+}
+
+void timedRunCheck() {
+  if (timedRunning) {
+    if(hour() == selectClockHour) {
+    Serial.println("Det er timen for å endre running til kjør");
+      Timer3.setPwmDuty(pin_PWM_a, 10);
+      Timer3.setPwmDuty(pin_PWM_b, 10);
+      if(minute() == selectClockMinute) {
+        Serial.println("Det er minuttet for å endre running til kjør");
+        Serial.println("Setter status running til 1");
+        runningHLT = true;
+        runningBoil = true;
+        timedRunning = false;
+      }
+    }
+  }
+}
+
+//    Timer3.setPwmDuty(pin_PWM_a, 0);          // set the pwm with the output of the pid output to control the SSR:
+//    Timer3.setPwmDuty(pin_PWM_b, 0);          // set the pwm with the output of the pid output to control the SSR:
+
+
+void digitalClockDisplay()
+{
+    // digital clock display of the time
+    Serial.print(hour());
+    printDigits(minute());
+    printDigits(second());
+    Serial.print(' ');
+    Serial.print(day());
+    Serial.print(' ');
+    Serial.print(month());
+    Serial.print(' ');
+    Serial.print(year());
+    Serial.println();
+}
+
+void printDigits(int digits)
+{
+    // utility function for digital clock display: prints preceding colon and leading 0
+    Serial.print(':');
+    if(digits < 10)
+        Serial.print('0');
+    Serial.print(digits);
+}
+
+void printAddress1(DeviceAddress addr) {
+  byte i;
+  for( i=0; i < 8; i++) {                         // prefix the printout with 0x
+      Serial.print("0x");
+      if (addr[i] < 16) {
+        Serial.print('0');                        // add a leading '0' if required.
+      }
+      Serial.print(addr[i], HEX);                 // print the actual value in HEX
+      if (i < 7) {
+        Serial.print(", ");
+      }
+    }
+  //Serial.print("\r\n");
+}
+
+//==========================================================================================
+//                                setup
+//==========================================================================================
+
+void setup(void) {
+  Serial.begin(9600);
+  Serial.println("brewController setup");
+  Serial.print("  version: ");
+  Serial.println(VERINFO);
+
+  /* Set the baudrate which is for debug and communicate with Nextion screen. */
+  Serial.println("nexInit");
+  nexInit();
+  
+  /* Register the pop event callback function of the current button0 component. */
+  pgPrep_btnMash.attachPop(pgPrep_btnMashPopCallback);
+  pgPrep_btnBoil.attachPop(pgPrep_btnBoilPopCallback);
+  pgPrep_btnCool.attachPop(pgPrep_btnCoolPopCallback);
+  pgPrep_btnHLTSetP.attachPop(pgPrep_btnHLTSetPPopCallback);
+  pgPrep_btnBoilSetP.attachPop(pgPrep_btnBoilSetPPopCallback);
+  pgPrep_btdsHLTRunStop.attachPop(pgPrep_btdsHLTRunStopPopCallback);
+  pgPrep_btnTimer.attachPop(pgPrep_btnTimerPopCallback);
+  pgPrep_btnHLTActualVol.attachPop(pgPrep_btnHLTActualVolPopCallback);
+  pgPrep_btdsBoilRunStop.attachPop(pgPrep_btdsBoilRunStopPopCallback);
+    
+  pgMash_btnPrep.attachPop(pgMash_btnPrepPopCallback);
+  pgMash_btnBoil.attachPop(pgMash_btnBoilPopCallback);
+  pgMash_btnCool.attachPop(pgMash_btnCoolPopCallback);
+  pgMash_btnHLTActualTemp.attachPop(pgMash_btnHLTActualTempPopCallback);
+  pgMash_btnBoilSetP.attachPop(pgMash_btnBoilSetPPopCallback);
+  pgMash_btnBoilSetPower.attachPop(pgMash_btnBoilSetPowerPopCallback);
+  pgMash_btdsHLTRunStop.attachPop(pgMash_btdsHLTRunStopPopCallback);
+  pgMash_btnHLTActualVol.attachPop(pgMash_btnHLTActualVolPopCallback);
+  pgMash_btdsBoilRunStop.attachPop(pgMash_btdsBoilRunStopPopCallback);
+
+  pgBoil_btnPrep.attachPop(pgBoil_btnPrepPopCallback);
+  pgBoil_btnMash.attachPop(pgBoil_btnMashPopCallback);
+  pgBoil_btnCool.attachPop(pgBoil_btnCoolPopCallback);
+  pgBoil_btnHLTActualTemp.attachPop(pgBoil_btnHLTActualTempPopCallback);
+  pgBoil_btnBoilSetP.attachPop(pgBoil_btnBoilSetPPopCallback);
+  pgBoil_btdsHLTRunStop.attachPop(pgBoil_btdsHLTRunStopPopCallback);
+  pgBoil_btnBoilSetPower.attachPop(pgBoil_btnBoilSetPowerPopCallback);
+  pgBoil_btdsBoilRunStop.attachPop(pgBoil_btdsBoilRunStopPopCallback);
+
+  pgCool_btnPrep.attachPop(pgCool_btnPrepPopCallback);
+  pgCool_btnMash.attachPop(pgCool_btnMashPopCallback);
+  pgCool_btnBoil.attachPop(pgCool_btnBoilPopCallback);  
+  pgCool_btnHLTActualTemp.attachPop(pgCool_btnHLTActualTempPopCallback);
+  pgCool_btdsHLTRunStop.attachPop(pgCool_btdsHLTRunStopPopCallback);
+
+  pgHLTtemp_btnBack.attachPop(pgHLTtemp_btnBackPopCallback);
+
+  pgBoilTemp_btnBack.attachPop(pgBoilTemp_btnBackPopCallback);
+
+  pgBoilPower_btnBack.attachPop(pgBoilPower_btnBackPopCallback);
+
+  pgHLTvolum_btnBack.attachPop(pgHLTvolum_btnBackPopCallback);
+
+  pgTimer_btnOk.attachPop(pgTimer_btnOkPopCallback);
+  pgTimer_btnBack.attachPop(pgTimer_btnBackPopCallback);
+  
+  pgStart_txtStep1.setText("Ok");
+
+  Serial.println("OneWire sensors"); delay(300);
+//  Wire.begin();                                // Start the Wire (I2C communications)
+  sensors.begin();                               // Start up the oneWire library
+  sensors.requestTemperatures();                 // fix/hack by elliot954
+  numberOfDevices = sensors.getDeviceCount();    // Grab a count of devices on the wire
+  Serial.print("  numberOfDevices:"); Serial.println(numberOfDevices);
+  Serial.print("  hardcode numbers (numberOfSensors):"); Serial.println(numberOfSensors);
+  
+  // report parasite power requirements
+  Serial.print("Parasite power is: "); 
+  if (sensors.isParasitePowerMode()) Serial.println("ON");
+  else Serial.println("OFF");
+  
+  for(int i=0;i<numberOfSensors; i++)            // Loop through each device, setting resolution
+  {
+     Serial.print("Setting resolution to ");
+     Serial.print(TEMPERATURE_PRECISION, DEC);
+     Serial.print(" for device ");
+     printAddress1(sensorAdr[i]);
+     sensors.setResolution(sensorAdr[i], TEMPERATURE_PRECISION);
+     delay(400);  
+     Serial.print(". Resolution actually set to: ");
+     Serial.println(sensors.getResolution(sensorAdr[i]), DEC); 
+
+  }
+  sensors.requestTemperatures();         // Send the command to get temperatures
+  delay(1000);                           // delay until conversion, supports even 12-bit 700ms
+  readSensor(HLT);
+  Serial.print("Hlt temp:");  Serial.println(sensorValue[HLT]);  delay(500);
+  sensors.setWaitForConversion(true);  // makes it async, main code must allow for timing  
+    
+  setSyncProvider(RTC.get);   // the function to get the time from the RTC
+  if(timeStatus() != timeSet)
+    Serial.println("Unable to sync with the RTC");
+  else
+    Serial.print("RTC has set the system time: ");
+  digitalClockDisplay();
+  delay(1000);
+  
+  Serial.println("pid parameters"); delay(300);
+  hltOutput = 0;
+  boilOutput = 0;
+  hltPID.SetOutputLimits(0, PID_LIMIT);   //tell the PID to range between 0 and the full window size
+  hltPID.SetMode(MANUAL);                 //turn the PID off
+  boilPID.SetOutputLimits(0, PID_LIMIT);  //tell the PID to range between 0 and the full window size
+  boilPID.SetMode(MANUAL);                //turn the PID off
+
+  displayTime = millis();
+  sensorTime = millis();
+  sendingTime = millis();
+  pwmDutyChangeTime = millis();
+  StartAutoRunTime = 0;
+
+  Serial.println("pwm parameters"); delay(300);
+  pinMode(pin_PWM_a, OUTPUT);                         // configure pin 2 for output:
+  pinMode(pin_PWM_b, OUTPUT);                         // configure pin 3 for output:
+  Timer3.initialize(TIMER_PERIOD);                    // initialize Timer3, and set a period. 100000=100 milli second
+  Timer3.pwm(pin_PWM_a, 0);                           // pre-initialise the pwm_a and set for 0% duty cycle
+  Timer3.pwm(pin_PWM_b, 0);                           // pre-initialise the pwm_b and set for 0% duty cycle
+  pinMode(pin_BUZZER, OUTPUT);                        // configure pin for output
+  pinMode(pin_HltValve, OUTPUT);                      // configure pin for output
+  pinMode(pin_PUMP, OUTPUT);                          // configure pin for output
+  pgStart_txtStep2.setText("Ok");
+
+  // start the Ethernet connection:
+  Serial.println("  ethernet"); delay(300);
+  if (Ethernet.begin(mac) == 0) {
+    Serial.println("Failed to configure Ethernet using DHCP");
+    // no point in carrying on, so do nothing forevermore:
+    networkOk = false;
+  }
+  else {
+    Serial.println("Ethernet configured using DHCP");
+    networkOk = true; 
+  }
+  // print your local IP address:
+  printIPAddress();
+  dtostrf(77, 2, 1, buffer);
+  sprintf(buffer, "%d.%d.%d.%d\0", Ethernet.localIP()[0], Ethernet.localIP()[1], Ethernet.localIP()[2], Ethernet.localIP()[3]);
+  pgStart_txtStep3.setText(buffer);
+  
+  Serial.println("thingspeak"); delay(300);
+  ThingSpeak.begin(client);
+
+  Serial.println("OneWire sensor"); delay(300);
+  dtostrf(sensorValue[1], 2, 1, buffer);
+  pgStart_txtStep4.setText(buffer);
+
+  Serial.print("checking free RAM...");
+  Serial.println(freeRam(), DEC);
+
+  timerHltBeep = timer.setInterval(500, hltAlarmBeeper);
+  timer.disable(timerHltBeep);                // No beep
+  timerHltLowLevelCheck = timer.setInterval(LOWLEVELCHECK_DELAY, hltLowLevelCheck);
+  timerHltLeveling = timer.setInterval(HLTLEVEL_DELAY,hltLeveling);
+  
+  Serial.println("HX711 loadcells: "); delay(300);
+  LoadCell_1.begin();
+  LoadCell_2.begin();
+  long stabilisingtime = 2000; // tare preciscion can be improved by adding a few seconds of stabilising time
+  byte loadcell_1_rdy = 0;
+  byte loadcell_2_rdy = 0;
+  while ((loadcell_1_rdy + loadcell_2_rdy) < 2) { //run startup, stabilization and tare, both modules simultaniously
+    if (!loadcell_1_rdy) loadcell_1_rdy = LoadCell_1.startMultiple(stabilisingtime);
+    if (!loadcell_2_rdy) loadcell_2_rdy = LoadCell_2.startMultiple(stabilisingtime);
+  }
+  LoadCell_1.setCalFactor(calValue_1); // user set calibration factor (float)
+  LoadCell_2.setCalFactor(calValue_2); // user set calibration factor (float)
+  LoadCell_1.setTareOffset(tareValue_1); // user set calibration factor (float)
+  LoadCell_2.setTareOffset(tareValue_2); // user set calibration factor (float)
+  Serial.println("HX711 Startup + tare is complete");
+  readHx711Sensors();
+
+  Serial.println("setup done");
+  delay(1000);
+  pgPrep.show();
+  current_page=pagePrep;
+}
+
+//==========================================================================================
+//                                main loop
+//==========================================================================================
+
+void loop(void)
+{
+  nexLoop(nex_listen_list);                                   // refresh communication with HMI
+
+  LoadCell_1.update();             // update() should be called at least as often as HX711 sample rate; >10Hz@10SPS, >80Hz@80SPS
+  LoadCell_2.update();             // longer delay in scetch will reduce effective sample rate (be carefull with delay() in loop)
+    
+  if(millis() - displayTime > DISPLAY_DELAY) {                // do display update if it is time for it
+    displayTime += DISPLAY_DELAY;
+    updateHmiDisplay();
+  }
+
+  if(millis() - sensorTime>SENSOR_DELAY) {                    // do OneWire sensor reading if it is time for it
+    sensorTime += SENSOR_DELAY;
+    readSensors();
+  }
+
+  if(millis() - readHx711Time>HX711_DELAY) {                  // do HX711 sensor reading and volume update if it is time for it
+    readHx711Time += HX711_DELAY;
+    readHx711Sensors();
+  }
+
+  if((millis() - sendingTime>SENDING_DELAY) && (networkOk)) { // do logging if it is time for it and network is available
+    sendingTime += SENDING_DELAY;
+    writeValues();
+  }
+ 
+  if(millis() - pwmDutyChangeTime > PWMDUTYCHANGE_DELAY) {    // do pwm duty update if it is time for it
+    pwmDutyChangeTime += PWMDUTYCHANGE_DELAY;
+    if ((runningHLT) && (!hltCriticalLevel)) {
+      hltPID.Compute();
+      Timer3.setPwmDuty(pin_PWM_a, hltOutput);                // set the pwm with the output of the pid output to control the SSR:
+    }
+    if (runningBoil) {
+      if(staticBoil) {
+        boilOutput = 10.23*boilPower;
+      } else {
+         boilPID.Compute();
+      }
+      Timer3.setPwmDuty(pin_PWM_b, boilOutput);               // set the pwm with the output of the pid output to control the SSR:
+    }
+  }
+ 
+  if (runningHLT) {
+    if (hltCriticalLevel) {
+      hltPID.SetMode(MANUAL);                                 // turn the PID off
+      hltOutput = 0;
+      Timer3.setPwmDuty(pin_PWM_a, 0);
+    }  
+    else {
+      hltPID.SetMode(AUTOMATIC);                              // turn the PID on
+    }
+  } else {
+    hltPID.SetMode(MANUAL);
+    hltOutput = 0;                                            // turn the PID off
+    Timer3.setPwmDuty(pin_PWM_a, 0);
+  }
+  
+  if (runningBoil) {
+    boilPID.SetMode(AUTOMATIC);                               // turn the PID on
+  } else {
+    boilPID.SetMode(MANUAL);
+    boilOutput = 0;                                           // turn the PID off
+    Timer3.setPwmDuty(pin_PWM_b, 0);
+  }
+
+  if (mashPump) {
+    digitalWrite(pin_PUMP, HIGH);                             // turn pump on
+  } else {
+    digitalWrite(pin_PUMP, LOW);                              // turn pump off
+  }
+
+  if (setTimedRunning) {
+    Serial.print("Setter alarm til å kjøre "); Serial.print(selectClockHour);  Serial.print(":");    Serial.println(selectClockMinute);       
+    timedRunning = true;
+    setTimedRunning = false;
+  }
+
+  timedRunCheck();
+  
+  // do HLT level check and sound alarm beep if neccesary
+  timer.run();
+}

@@ -1,0 +1,558 @@
+/* Boiler_1_1_2.ino
+IDE version 1.8.7 with Arduino MKR 1010. U-BLOX NINA-W10 2.4GHz Wifi Ethernet onboard. DHCP IP addr.
+Nextion Ver0.53 w/ 3.2 TouchLCD.
+  D3   OneWire bus for DS18B20. Mini protoboard w 6 connectors.
+  D7   PWM SSR control via TCC0. MOSFET IRF 3708 to trigger two SSR DB25.
+  D13  MKR RX - Nextion TX blue
+  D14  MKR TX - Nextion RX yellow
+ */
+
+// libraries
+#include <SPI.h>
+#include <WiFiNINA.h>
+#include "arduino_secrets.h"
+#include "ThingSpeak.h"
+#include "Nextion.h"
+#include "PID_v1.h"              // Version 1.1.0
+#include <OneWire.h>             // Version 2.1
+#include <DallasTemperature.h>   // VERSION 3.7.2 BETA
+#include <avr/dtostrf.h>
+
+///////please enter your sensitive data in the Secret tab/arduino_secrets.h
+char ssid[] = SECRET_SSID;        // your network SSID (name)
+char pass[] = SECRET_PASS;        // your network password (use for WPA, or use as key for WEP)
+int keyIndex = 0;                 // your network key Index number (needed only for WEP)
+WiFiClient  client;
+
+// declare objects
+/*
+ * Declare a text object [page id:0,component id:1, component name: "t0"]. 
+ * Declare a button object [page id:0,component id:3, component name: "b1"].
+ * Declare a number object [page id:0,component id:3, component name: "n0"]. 
+ * Declare a dual state button object [page id:0,component id:1, component name: "bt0"]. 
+ */
+NexText     pgStart_txtStep1               = NexText(0, 6, "t4");       // Info on Startup page
+NexText     pgStart_txtStep2               = NexText(0, 7, "t5");       // Info on Startup page
+NexText     pgStart_txtStep3               = NexText(0, 8, "t6");       // Info on Startup page
+NexText     pgStart_txtStep4               = NexText(0, 9, "t7");       // Info on Startup page
+
+NexPage     pgBoil                         = NexPage(1, 0, "Boil");
+NexText     pgBoil_txtDipActualTemp        = NexText(1,11, "t6");       // Display Boil Dip tube actualTemp on Boil page
+NexText     pgBoil_txtBoilActualTempMid    = NexText(1,9, "t2");        // Display Boil Mid actualTemp on Boil page
+NexText     pgBoil_txtBoilActualTempLower  = NexText(1, 5, "t8");       // Display Boil Lower actualTemp on Boil page
+NexButton   pgBoil_btnBoilSetP             = NexButton(1, 3, "b3");     // Display Boil SetP / go to BoilTemp page
+NexButton   pgBoil_btnBoilSetPower         = NexButton(1, 6, "b7");     // Display Boil Power SetP / go to BoilPower page
+NexDSButton pgBoil_btdsBoilRunStop         = NexDSButton(1, 1, "bt1");  // Boil Run / Stop button on Boil page
+
+NexPage     pgBoilTemp                     = NexPage(2, 0, "Temp");
+NexButton   pgBoilTemp_btnBack             = NexButton(2, 1, "b0");     // go back to calling page
+NexText     pgBoilTemp_txtBoilSetP         = NexText(2,14, "t7");       // Display Boil SetP on BoilTtemp page
+NexText     pgBoilTemp_txtBoilActualTemp   = NexText(2,15, "t8");       // Display Boil actualTemp on BoilTemp page
+NexText     pgBoilTemp_txtBoilActualPower  = NexText(2,11, "t6");       // Display Boil actualPower on BoilTemp page
+NexNumber   pgBoilTemp_numBoilSetP         = NexNumber(2, 6, "n0");     // Display Boil SetP on BoilTemp page
+
+NexPage     pgBoilPower                    = NexPage(3, 0, "Power");
+NexButton   pgBoilPower_btnBack            = NexButton(3, 1, "b0");     // go back to calling page
+NexText     pgBoilPower_txtBoilPowerSetP   = NexText(3,16, "t7");       // Display Boil Power SetP on BoilPower page
+NexText     pgBoilPower_txtBoilActualTemp  = NexText(3, 17, "t8");      // Display Boil actualTemp on BoilPower page
+NexText     pgBoilPower_txtBoilActualPower = NexText(3,13, "t6");       // Display Boil actualPower on BoilPower page
+NexNumber   pgBoilPower_numBoilPowerSetP   = NexNumber(3,7, "n2");      // Display Boil Power SetP on BoilPower page
+
+// variables:
+boolean debug = false;              // wait for serial line (USB) or not.
+int status = WL_IDLE_STATUS;
+char buffer[100] = {0};             // Buffer for conversion .setText
+double sensorValue[4];              // actual DS18B20/MAX sensor value
+int numberOfDevices;                // Number of oneWire devices found
+double boilSet = 45;                // set point for pid
+double boilOutput;                  // define variables for the PID
+boolean reqTemp = true;             // swap request or read temperature probes
+boolean runningBoil = false;        // on-off state for Boil, execute the pid control or only do logging
+boolean staticBoil = false;         // on-off state for static Boil power (no pid), execute pwm power or only do logging
+double boilPower = 0;               // fixed set point for boiler power (no pid)
+int current_page = 0;               // Current page number of Nextion display
+int prev_page = 0;                  // Previous page number of Nextion display, enables return
+unsigned long displayTime;          // state machine time variable for updating display
+unsigned long sensorTime;           // state machine time variable for reading sensors
+unsigned long sendingTime;          // state machine time variable for sending values to ThingSpeak
+unsigned long pwmDutyChangeTime;    // state machine time variable for updating pwm duty cycle
+unsigned long StartAutoRunTime;     // time variable for auto cycle start time
+boolean networkOk = false;          // status for network connection
+byte mac[] = { 0x00, 0xAA, 0xBB, 0x1C, 0xDE, 0x02 }; // Enter a MAC address for your controller.
+unsigned long myChannelNumber = 660094; // Thingspeek channel
+
+// constants
+#define VERINFO "1.1.2"
+const byte pageBoil = 1;          // Nextion Boil menu page
+const byte pageBoilTemp = 2;      // Nextion Boil temp setting page
+const byte pageBoilPower = 3;     // Nextion Boil power setting page
+const byte pageNetworkInfo = 4;   // Nextion Network info page
+#define PERIODE 3000000           // Set the frequency of the PWM on TCC0 to 1/3Hz
+#define PERCENT   30000           // Set the frequency for 1% on the PWM on TCC0
+#define PWMDUTYCHANGE_DELAY 2000  // interval in ms for updating pwm duty cycle
+#define DISPLAY_DELAY 1000        // interval in ms for updating display
+#define SENSOR_DELAY 3500         // interval in ms for reading OneWire sensors
+#define SENDING_DELAY 20000       // interval in ms for sending values to Thingspeek
+#define PID_LIMIT 1023            // output limit for the PID, same range as timer3 pwm duty cycle
+#define PARAM_KP 400              // PID parameter Kp
+#define PARAM_KI 25               // PID parameter Ki
+#define PARAM_KD 100              // PID parameter Kd
+/*  The Ziegler-Nichols Tuning Rule Table
+ *  Termaks test3: Kp=15.6 Ki=0,39 Kd=156 (L=20 T=260)
+ *  Termaks test2: Kp=9.6 Ki=0,16 Kd=144 (L=30 T=240)
+ *  Termaks test1: Kp=36 Ki=1,8 Kd=180 (L=10 T=300)
+ *  L=20 T=500: Kp=30 Ki=0,75 Kd=300
+ *  Brewkettle 100L: Kp=36 Ki=1,8 Kd=180
+ *  Pizzaovn 900x900: Kp=50 Ki=0,1 Kd=25
+ */ 
+#define BOIL_LOW 0                // Sensor index, Lower side wall
+#define BOIL_MID 1                // sensor index, Middle side wall. Used for pd control
+#define DIP 2                     // sensor index, Free dip tube
+#define ONE_WIRE_BUS 3            // data wire on pin D3
+#define TEMPERATURE_PRECISION 10  // oneWire DS18B20 10-bit precision
+#define PCO_BLACK 0               // Nextion text component color
+#define PCO_RED 63488             // Nextion text component color
+#define PCO_GRAY 46518            // Nextion text component color
+const char * myWriteAPIKey = "00000000SLRVFRS"; // Thingspeek write api key
+const byte numberOfSensors = 3;   // Number of oneWire temperature devices
+DeviceAddress sensorAdr[]=
+  {
+    { 0x28, 0xFF, 0x4A, 0xA4, 0x68, 0x18, 0x03, 0x43 },  // BOIL_LOW  (lower sensor)
+    { 0x28, 0xFF, 0xDB, 0xC2, 0x6D, 0x18, 0x01, 0x29 },  // BOIL_MID  (mid sensor, used for pid control)
+    { 0x28, 0x6D, 0x28, 0x1B, 0x04, 0x00, 0x00, 0x63 }   // Dip     (dip tube sensor)
+};
+
+// declare objects
+NexTouch *nex_listen_list[] = 
+{
+    &pgStart_txtStep1,
+    &pgStart_txtStep2,
+    &pgStart_txtStep3,
+    &pgStart_txtStep4,
+    &pgBoil,
+    &pgBoil_txtBoilActualTempMid,
+    &pgBoil_txtBoilActualTempLower,
+    &pgBoil_txtDipActualTemp,
+    &pgBoil_btnBoilSetP,
+    &pgBoil_btnBoilSetPower,
+    &pgBoil_btdsBoilRunStop,
+    &pgBoilTemp,
+    &pgBoilTemp_btnBack,
+    &pgBoilTemp_txtBoilActualPower,
+    &pgBoilTemp_txtBoilActualTemp,
+    &pgBoilTemp_txtBoilSetP,
+    &pgBoilTemp_numBoilSetP,
+    &pgBoilPower,
+    &pgBoilPower_btnBack,
+    &pgBoilPower_txtBoilPowerSetP,
+    &pgBoilPower_txtBoilActualTemp,
+    &pgBoilPower_txtBoilActualPower,
+    &pgBoilPower_numBoilPowerSetP,
+    NULL
+};
+
+PID boilPID(&sensorValue[BOIL_MID], &boilOutput, &boilSet, PARAM_KP, PARAM_KI, PARAM_KD, DIRECT); //Specify the links and initial tuning parameters
+
+OneWire oneWire(ONE_WIRE_BUS);       // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+DallasTemperature sensors(&oneWire); // Pass our oneWire reference to Dallas Temperature.
+
+void setupTimer(void) { 
+  REG_GCLK_GENDIV = GCLK_GENDIV_DIV(3) | GCLK_GENDIV_ID(4);       // Divide the 48MHz clock source by divisor 3: 48MHz/3=16MHz
+  while (GCLK->STATUS.bit.SYNCBUSY);                              // Select Generic Clock (GCLK) 4; Wait for synchronization
+
+  // Set the duty cycle to 50/50 HIGH/LOW, Enable GCLK4, Set the 48MHz clock source, Select GCLK4
+  REG_GCLK_GENCTRL = GCLK_GENCTRL_IDC | GCLK_GENCTRL_GENEN | GCLK_GENCTRL_SRC_DFLL48M | GCLK_GENCTRL_ID(4);
+  while (GCLK->STATUS.bit.SYNCBUSY);              // Wait for synchronization
+
+  // Enable the port multiplexer for the digital pin D7 
+  PORT->Group[g_APinDescription[7].ulPort].PINCFG[g_APinDescription[7].ulPin].bit.PMUXEN = 1;
+
+  // Connect the TCC0 timer to digital outputs - port pins are paired odd PMUO and even PMUXE
+  // F & E specify the timers: TCC0, TCC1 and TCC2
+  PORT->Group[g_APinDescription[6].ulPort].PMUX[g_APinDescription[6].ulPin >> 1].reg = PORT_PMUX_PMUXO_F;
+
+  // Feed GCLK4 to TCC0 and TCC1,Enable GCLK4 to TCC0 and TCC1, Select GCLK4, Feed GCLK4 to TCC0 and TCC1
+  REG_GCLK_CLKCTRL = GCLK_CLKCTRL_CLKEN | GCLK_CLKCTRL_GEN_GCLK4 | GCLK_CLKCTRL_ID_TCC0_TCC1;
+  while (GCLK->STATUS.bit.SYNCBUSY);              // Wait for synchronization
+
+  // Normal (single slope) PWM operation: timers countinuously count up to PER register value and then is reset to 0
+  REG_TCC0_WAVE |= TCC_WAVE_WAVEGEN_NPWM;         // Setup single slope PWM on TCC0
+  while (TCC0->SYNCBUSY.bit.WAVE);                // Wait for synchronization
+  
+  REG_TCC0_PER = PERIODE;      // Set the frequency of the PWM on TCC0
+  while(TCC0->SYNCBUSY.bit.PER);
+
+  // Divide the 16MHz signal GCLK4 by 16 giving 1MHz (1us) TCC0 timer tick and enable the outputs
+  REG_TCC0_CTRLA |= TCC_CTRLA_PRESCALER_DIV16 | TCC_CTRLA_ENABLE;
+  while (TCC0->SYNCBUSY.bit.ENABLE);              // Wait for synchronization
+}
+
+void setDuty(int i)
+{
+  Serial.print("set duty to: ");
+  Serial.print(i);
+  Serial.println("%.");
+  REG_TCC0_CC3 = PERCENT * i;         // TCC0 CC3 - on D7
+  while (TCC0->SYNCBUSY.bit.CC3);      // Wait for synchronization
+}
+
+void readSensor(byte i)
+{
+  Serial.println("Boiler readsensor");
+  sensors.requestTemperatures(); // Send the command to get temperatures
+  sensorValue[i] = sensors.getTempC(sensorAdr[i]);
+  Serial.println(sensorValue[i]);
+}
+
+void readSensors(void)
+{
+  if ( reqTemp ) {
+    //Serial.print("Boiler requestTemperatures   ");
+    sensors.setWaitForConversion(false);  // makes it async  
+    sensors.requestTemperatures(); // Send the command to get temperatures
+    sensors.setWaitForConversion(true);
+    reqTemp = false;
+  } else
+  {
+    //Serial.print("Boiler getTempC   ");
+    for(int i=0;i<numberOfSensors; i++)   // Loop through each device
+    {
+       sensorValue[i] = sensors.getTempC(sensorAdr[i]);
+       //Serial.print(sensorValue[i]);
+       //Serial.print("   ");
+    }
+    reqTemp = true;
+  }
+  //Serial.println(" ");
+}
+
+void printIPAddress()
+{
+  Serial.print("My IP address: ");
+  for (byte thisByte = 0; thisByte < 4; thisByte++) {
+    // print the value of each byte of the IP address:
+    Serial.print(WiFi.localIP()[thisByte], DEC);
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  Serial.print("My Gateway address: ");
+  for (byte thisByte = 0; thisByte < 4; thisByte++) {
+    // print the value of each byte of the IP address:
+    Serial.print(WiFi.gatewayIP()[thisByte], DEC);
+    Serial.print(".");
+  }
+
+  Serial.println();
+}
+
+void printMacAddress(byte mac[]) {
+  for (int i = 5; i >= 0; i--) {
+    if (mac[i] < 16) {
+      Serial.print("0");
+    }
+    Serial.print(mac[i], HEX);
+    if (i > 0) {
+      Serial.print(":");
+    }
+  }
+  Serial.println();
+}
+
+void writeValues(void) {
+  Serial.println("writeValues");
+  dtostrf(sensorValue[BOIL_LOW], 1, 2, buffer);          ThingSpeak.setField(1,buffer);
+  dtostrf(sensorValue[BOIL_MID], 1, 2, buffer);          ThingSpeak.setField(2,buffer);
+  dtostrf(sensorValue[DIP], 1, 2, buffer);               ThingSpeak.setField(4,buffer);
+  dtostrf(boilSet, 1, 0, buffer);                        ThingSpeak.setField(6,buffer);
+  if (runningBoil == 0) ThingSpeak.setField(7,103); else ThingSpeak.setField(7,113);
+  dtostrf(1+boilOutput/10.23, 1, 0, buffer);             ThingSpeak.setField(8,buffer);
+
+  ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);  
+}
+
+//==========================================================================================
+//                                Nextion Touchscreen code 
+//==========================================================================================
+
+void pgBoil_btdsBoilRunStopPopCallback(void *ptr) {
+    uint32_t dual_state;
+    pgBoil_btdsBoilRunStop.getValue(&dual_state);
+    if(dual_state) 
+    {   runningBoil = true;
+        boilPID.SetMode(AUTOMATIC);                  // turn the PID on
+    } else
+    {   runningBoil = false;
+        boilPID.SetMode(MANUAL);  boilOutput = 0;    // turn the PID off
+    }
+}
+
+void pgBoil_btnBoilSetPPopCallback(void *ptr) {
+  prev_page=pageBoil;
+  current_page=pageBoilTemp;
+  pgBoilTemp.show();
+  dtostrf(boilSet, 2, 0, buffer);
+  pgBoilTemp_txtBoilSetP.setText(buffer);
+  pgBoilTemp_numBoilSetP.setValue(boilSet);
+}
+
+void pgBoil_btnBoilSetPowerPopCallback(void *ptr) {
+  prev_page=pageBoil;
+  current_page=pageBoilPower;
+  pgBoilPower.show();
+  dtostrf(boilPower, 2, 0, buffer);
+  pgBoilPower_txtBoilPowerSetP.setText(buffer);
+  pgBoilPower_numBoilPowerSetP.setValue(boilPower);
+}
+
+void pgBoilTemp_btnBackPopCallback(void *ptr) {
+  memset(&buffer[0], 0, sizeof(buffer));
+  pgBoilTemp_txtBoilSetP.getText(buffer, sizeof(buffer));
+  Serial.print(" Dbg2 buffer:"); Serial.print(buffer);
+  boilSet=atof(buffer);
+  Serial.print(" Dbg3 boilSet:"); Serial.print(boilSet);
+  current_page=prev_page;
+  prev_page=pageBoilTemp;
+  staticBoil = false;
+  Serial.print("Dbg4 going to page:"); Serial.print(current_page);
+    switch(current_page) {
+      case pageBoil:
+        pgBoil.show();
+      break;
+    }
+  Serial.println(" dbg end.");
+}
+
+void pgBoilPower_btnBackPopCallback(void *ptr) {
+  memset(&buffer[0], 0, sizeof(buffer));
+  pgBoilPower_txtBoilPowerSetP.getText(buffer, sizeof(buffer));
+  Serial.print(" Dbg5 buffer:"); Serial.print(buffer);
+  boilPower=atof(buffer);
+  Serial.print(" Dbg6 boilPower:"); Serial.print(boilPower);
+  current_page=prev_page;
+  prev_page=pageBoilPower;
+  staticBoil = true;
+  Serial.print("Dbg7 going to page:"); Serial.print(current_page);
+    switch(current_page) {
+      case pageBoil:
+        pgBoil.show();
+      break;
+    }
+  Serial.println(" dbg end.");
+}
+
+void updateHmiDisplay()
+{
+    Serial.print("Dbg1 current_page:"); Serial.print(current_page);
+    Serial.print(" prev_page:"); Serial.print(prev_page);
+    Serial.print(" runningBoil:"); Serial.print(runningBoil);
+    Serial.print(" boilPower:"); Serial.print(boilPower);
+    Serial.print(" boilSet:"); Serial.print(boilSet);
+    Serial.println(" dbg end.");
+    switch(current_page) {
+      case pageBoil:
+        dtostrf(sensorValue[BOIL_LOW], 2, 1, buffer); pgBoil_txtBoilActualTempLower.setText(buffer);
+        dtostrf(sensorValue[BOIL_MID], 2, 1, buffer); pgBoil_txtBoilActualTempMid.setText(buffer);
+        dtostrf(sensorValue[DIP], 2, 1, buffer);    pgBoil_txtDipActualTemp.setText(buffer);
+        if(runningBoil) {
+          pgBoil_btdsBoilRunStop.setValue(1);
+          if (!staticBoil) {
+            dtostrf(boilSet, 2, 1, buffer);             pgBoil_btnBoilSetP.setText(buffer);
+            dtostrf(boilOutput/10.23, 2, 0, buffer);    pgBoil_btnBoilSetPower.setText(buffer);
+          } 
+          else {
+            pgBoil_btnBoilSetP.setText("-");
+            dtostrf(boilPower, 2, 0, buffer);           pgBoil_btnBoilSetPower.setText(buffer);
+          }
+        }  
+        else {
+          if(!staticBoil ) {
+            dtostrf(boilSet, 2, 1, buffer);             pgBoil_btnBoilSetP.setText(buffer);
+            pgBoil_btnBoilSetPower.setText("-");
+          } 
+          else {
+            pgBoil_btnBoilSetP.setText("-");
+            dtostrf(boilPower, 2, 0, buffer);           pgBoil_btnBoilSetPower.setText(buffer);
+          }
+        }
+      break;
+      case pageBoilTemp:
+        dtostrf(sensorValue[BOIL_MID], 2, 1, buffer); pgBoilTemp_txtBoilActualTemp.setText(buffer);
+        if(runningBoil) {
+           dtostrf(boilOutput/10.23, 2, 0, buffer); pgBoilTemp_txtBoilActualPower.setText(buffer);
+        } else { 
+          pgBoilTemp_txtBoilActualPower.setText("-");
+        }
+      break;
+      case pageBoilPower:
+        dtostrf(sensorValue[BOIL_MID], 2, 1, buffer); pgBoilPower_txtBoilActualTemp.setText(buffer);
+        if(runningBoil) {
+           dtostrf(boilOutput/10.23, 2, 0, buffer); pgBoilPower_txtBoilActualPower.setText(buffer);
+        } else { 
+          pgBoilPower_txtBoilActualPower.setText("-");
+        }
+      break;
+    }
+}
+
+//==========================================================================================
+//                                setup
+//==========================================================================================
+
+void setup(void) {
+  Serial.begin(9600);
+  if (debug)
+  { while (!Serial) { }
+    ; // wait for serial port to connect, if in debug mode. Needed for native USB port only
+  }
+  
+  Serial.println("Boiler setup");
+  Serial.print("  version: ");
+  Serial.println(VERINFO);
+
+  /* Set the baudrate which is for debug and communicate with Nextion screen. */
+  Serial.println("nexInit");
+  nexInit();
+  
+  /* Register the pop event callback function of the current button0 component. */
+  pgBoil_btnBoilSetP.attachPop(pgBoil_btnBoilSetPPopCallback);
+  pgBoil_btnBoilSetPower.attachPop(pgBoil_btnBoilSetPowerPopCallback);
+  pgBoil_btdsBoilRunStop.attachPop(pgBoil_btdsBoilRunStopPopCallback);
+
+  pgBoilTemp_btnBack.attachPop(pgBoilTemp_btnBackPopCallback);
+
+  pgBoilPower_btnBack.attachPop(pgBoilPower_btnBackPopCallback);
+
+  pgStart_txtStep1.setText("Ok");
+
+  Serial.println("OneWire sensors"); delay(300);
+//  Wire.begin();                                // Start the Wire (I2C communications)
+  sensors.begin();                               // Start up the oneWire library
+  numberOfDevices = sensors.getDeviceCount();    // Grab a count of devices on the wire
+  Serial.print("  numberOfDevices:"); Serial.println(numberOfDevices);
+  for(int i=0;i<numberOfSensors; i++)            // Loop through each device, setting resolution
+  {
+     sensors.setResolution(sensorAdr[i], TEMPERATURE_PRECISION);
+     delay(400);  
+  }
+  sensors.requestTemperatures();         // Send the command to get temperatures
+  readSensor(BOIL_LOW);
+  Serial.print("Boil temp:");  Serial.println(sensorValue[BOIL_LOW]);  delay(1500);
+  
+  Serial.println("pid parameters"); delay(300);
+  boilOutput = 0;
+  boilPID.SetOutputLimits(0, PID_LIMIT);  //tell the PID to range between 0 and the full window size
+  boilPID.SetMode(MANUAL);                //turn the PID off
+
+  displayTime = millis();
+  sensorTime = millis();
+  sendingTime = millis();
+  pwmDutyChangeTime = millis();
+
+  Serial.println("pwm parameters"); delay(300);
+  setupTimer();
+  setDuty(0);                           // pre-initialise the pwm and set for 0% duty cycle
+  Serial.println("pwm parameters finish"); delay(300);
+  pgStart_txtStep2.setText("Ok");
+
+  // start the Ethernet connection:
+  Serial.println("ethernet DHCP IP"); delay(300);
+
+  // check for the WiFi module:
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("Communication with WiFi module failed!");
+    // don't continue
+    while (true);
+  }
+
+  String fv = WiFi.firmwareVersion();
+  if (fv < "1.0.0") {
+    Serial.println("Please upgrade the firmware");
+  }
+
+  // print your MAC address:
+  byte mac[6];
+  WiFi.macAddress(mac);
+  Serial.print("MAC: ");
+  printMacAddress(mac);
+  
+  // Connect or reconnect to WiFi
+  if(WiFi.status() != WL_CONNECTED){
+    Serial.print("Attempting to connect to SSID: ");  Serial.println(SECRET_SSID);
+    while(WiFi.status() != WL_CONNECTED){
+      WiFi.begin(ssid, pass); // Connect to WPA/WPA2 network. Change this line if using open or WEP network
+      Serial.print(".");
+      delay(1000);     
+    } 
+    networkOk = true;
+    Serial.println("\nConnected.");
+  }
+
+  // you're connected now, so print out the status, print the SSID of the network you're attached to:
+  Serial.print("SSID: ");   Serial.println(WiFi.SSID());
+
+  // print your board's IP address:
+  IPAddress ip = WiFi.localIP();
+  Serial.print("IP Address: ");   Serial.println(ip);
+
+  // print the received signal strength:
+  long rssi = WiFi.RSSI();
+  Serial.print("signal strength (RSSI):");   Serial.print(rssi);   Serial.println(" dBm");
+  
+  // print your board's IP address:
+  printIPAddress();
+  sprintf(buffer, "%d.%d.%d.%d\0", WiFi.localIP()[0], WiFi.localIP()[1], WiFi.localIP()[2], WiFi.localIP()[3]);
+  pgStart_txtStep3.setText(buffer);
+  
+  Serial.println("thingspeak"); delay(300);
+  ThingSpeak.begin(client);
+
+  Serial.println("OneWire sensor"); delay(300);
+  dtostrf(sensorValue[1], 2, 1, buffer);
+  pgStart_txtStep4.setText(buffer);
+
+  pgBoil.show();
+  current_page=pageBoil;
+  
+  Serial.println("setup done");
+  delay(1000);
+}
+
+//==========================================================================================
+//                                main loop
+//==========================================================================================
+
+void loop(void)
+{
+  nexLoop(nex_listen_list);                                   // refresh communication with HMI
+
+  if(millis() - displayTime > DISPLAY_DELAY) {                // do display update if it is time for it
+    displayTime += DISPLAY_DELAY;
+    updateHmiDisplay();
+  }
+
+  if(millis() - sensorTime>SENSOR_DELAY) {                    // do OneWire sensor reading if it is time for it
+    sensorTime += SENSOR_DELAY;
+    readSensors();
+  }
+
+  if((millis() - sendingTime>SENDING_DELAY) && (networkOk)) { // do logging if it is time for it and network is available
+    sendingTime += SENDING_DELAY;
+    writeValues();
+  }
+ 
+  if(millis() - pwmDutyChangeTime > PWMDUTYCHANGE_DELAY) {    // do pwm duty update if it is time for it
+    pwmDutyChangeTime += PWMDUTYCHANGE_DELAY;
+    if (runningBoil) {                                        // if running
+      if (!staticBoil) {                                      // pid run
+        boilPID.Compute();
+        setDuty(boilOutput/10.23);                            // set the pwm with the pid output to control the SSR:
+      } else {                                                // statuc power run
+        setDuty(boilPower);                                   // set the pwm with the static output to control the SSR:
+      } 
+    } else {
+      setDuty(0);                                             // set pwm to zero, zero output to the SSR:
+    }
+  }
+}

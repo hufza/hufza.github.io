@@ -1,0 +1,343 @@
+/* HeatPumpAccuTankLogger version 1.2.1
+Pin allocation on Mega. IDE version 1.8.10 with Arduino Mega 2560
+Ethernet W5100 shield.
+DHCP IP addr. 1-Wire DS18B20 sensors (14x).
+  A01 CT signal from electric hotwater heater
+  D07 Optocouple (reversed v/220v to 12V trafo) signal from pump  
+  D09  OneWire data
+*/
+
+// libraries
+#include "ThingSpeak.h"
+#include <SPI.h>
+#include <Ethernet.h>
+#include "arduino_secrets.h"
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include "EmonLib.h"                   // Include Emon Library
+//#include <avr/pgmspace.h>
+//#include <avr/dtostrf.h>
+//#include<stdlib.h>
+
+// variables:
+boolean debug = false;               // wait for serial line (USB) or not.
+char buffer[100] = {0};              // Buffer for conversion .setText
+double sensorValue[14];              // actual DS18B20/MAX sensor value
+unsigned long sensorTime;            // state machine time variable for reading sensors
+unsigned long sendingTime;           // state machine time variable for sending values to ThingSpeak
+boolean networkOk = false;           // status for network connection
+byte mac[] = { 0x00, 0xAA, 0xB4, 0x1D, 0xDE, 0x02 }; // Enter a MAC address for your controller.
+//IPAddress ip(192,168,0,129);       // the IP address is dependent on your network
+unsigned long channel_id1 = 263635;  // Thingspeek channel: HeatPumpAccuTankLogger1
+unsigned long channel_id2 = 354619;  // Thingspeek channel: HeatPumpAccuTankLogger2
+int sensorCount = 0;                 // actual count of connected and found sensors
+int pumpState = 0;                   // variable for reading the burner status
+int ledState = LOW;                  // ledState used to set the LED
+int ledCycle = LOW;                  // ledCycle used to cycle the LED
+unsigned long previousMillis = 0;    // will store last time LED was updated
+double Irms;                         // calculated Irms from Emon library
+
+// constants
+#define VERINFO "1.2.1"
+#define SENSOR_DELAY 3000         // interval in ms for reading sensors
+#define SENDING_DELAY 60000       // interval in ms for sending values to Thingspeek
+#define COLD_WATER 0              // Sensor index, T1 Kaldt vann
+#define PRE_HEATED1 1             // Sensor index, T2 Forvarming trinn 1
+#define PRE_HEATED2 2             // Sensor index, T3 Forvarming trinn 2
+#define HOT_WATER_TANK 3          // Sensor index, T4 Varmtvann tank
+#define HOT_WATER_USE 4           // Sensor index, T5 Varmtvann forbruk
+#define RADIATOR_RETURN_AT 5      // Sensor index, T11 Radiator retur akkumulator tank
+#define RADIATOR_RETURN_HP 6      // Sensor index, T12 Radiator retur varmepumpe
+#define HEATING_AT 7              // Sensor index, T13 Varming akkumulator tank
+#define ACCU_TANK 8               // Sensor index, T14 Akkumulator tank
+#define RADIATOR_HEAT 9           // Sensor index, T15 Radiator tur
+#define BRINE_HOT 10              // Sensor index, T21 Brine tur
+#define BRINE_COLD 11             // Sensor index, T22 Brine retur
+#define OUTDOOR 12                // Sensor index, T31 Utetemperatur
+const char * api_id1 = "000000001UB5PCJ9"; // Thingspeek write api key
+const char * api_id2 = "0000000001NBRRR7"; // Thingspeek write api key
+#define PUMP_PIN 7
+#define ONE_WIRE_BUS 9
+#define TEMPERATURE_PRECISION 10
+const long longInterval = 9000;           // interval at which to blink (milliseconds)
+const long shortInterval = 400;           // interval at which to blink (milliseconds)
+
+DeviceAddress sensorAdr[]=
+  {
+    { 0x28, 0xAA, 0x70, 0xDD, 0x38, 0x14, 0x01, 0x0E }, // T1 COLD_WATER
+    { 0x28, 0xFF, 0xE0, 0x9C, 0x6E, 0x18, 0x01, 0xF4 }, // T2 PRE_HEATED1
+    { 0x28, 0xFF, 0xBB, 0x88, 0x6E, 0x18, 0x01, 0x27 }, // T3 PRE_HEATED2
+    { 0x28, 0xFF, 0x7B, 0xC4, 0x6D, 0x18, 0x01, 0x13 }, // T4 HOT_WATER_TANK
+    { 0x28, 0xFF, 0xE4, 0xA5, 0x68, 0x18, 0x03, 0x5D }, // T5 HOT_WATER_USE
+    { 0x28, 0xFF, 0x98, 0x92, 0x6D, 0x18, 0x01, 0x56 }, // T11 RADIATOR_RETURN_AT
+    { 0x28, 0xE3, 0x19, 0x1B, 0x04, 0x00, 0x00, 0xD3 }, // T12 RADIATOR_RETURN_HP
+    { 0x28, 0xFF, 0x25, 0x1B, 0x69, 0x18, 0x03, 0x9D }, // T13 HEATING_AT
+    { 0x28, 0xFF, 0xFC, 0x20, 0x69, 0x18, 0x03, 0xEC }, // T14 ACCU_TANK
+    { 0x28, 0xFF, 0x6C, 0x1B, 0x69, 0x18, 0x03, 0x87 }, // T15 RADIATOR_HEAT
+    { 0x28, 0xAA, 0xC7, 0xCC, 0x38, 0x14, 0x01, 0xA7 }, // T21 BRINE_HOT
+    { 0x28, 0xAA, 0x49, 0xD1, 0x38, 0x14, 0x01, 0x6B }, // T22 BRINE_COLD
+    { 0x28, 0xAA, 0x78, 0xC9, 0x38, 0x14, 0x01, 0x06 }  // T31 OUTDOOR
+};
+
+// Initialize the Ethernet client library
+// with the IP address and port of the server
+// that you want to connect to (port 80 is default for HTTP):
+EthernetClient client;
+
+// Initialize the Emon library
+EnergyMonitor emon1;                   // Create an instance'
+
+// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+OneWire oneWire(ONE_WIRE_BUS);
+
+// Pass our oneWire reference to Dallas Temperature. 
+DallasTemperature sensors(&oneWire);
+
+int freeRam() {
+  extern int __heap_start, *__brkval;
+  int v;
+  return (int) &v - (__brkval ==0 ? (int) &__heap_start : (int) __brkval);
+}
+
+void printIPAddress()
+{
+  Serial.print("My IP address: ");
+  for (byte thisByte = 0; thisByte < 4; thisByte++) {
+    // print the value of each byte of the IP address:
+    Serial.print(Ethernet.localIP()[thisByte], DEC);
+    Serial.print(".");
+  }
+  Serial.println();
+}
+
+void read1WireSensors(void) {
+  // call sensors.requestTemperatures() to issue a global temperature 
+  // request to all devices on the bus
+  Serial.print("Requesting temperatures...");
+  sensors.requestTemperatures();
+  Serial.println("DONE");
+
+  for (int i=0; i <= sensorCount-1; i++){
+   sensorValue[i] = sensors.getTempC(sensorAdr[i]);
+  }
+
+  Serial.print("Temperature 1-Wire = "); 
+  for (int i=0; i <= sensorCount-1; i++){
+   Serial.print(sensorValue[i]); Serial.print(" # ");
+  }  
+  Serial.println(Irms);
+}
+
+void writeValuesOld(void) {
+  Serial.println("writeValues");
+  if (pumpState == HIGH) {              // check if the burner is active.
+    ThingSpeak.setField(8,0);
+    Serial.println("burner off");
+  } else {
+    ThingSpeak.setField(8,1);
+    Serial.println("burner on");
+  }
+}
+
+void writeValues(void) {
+  Serial.println("writeValues Set One:");
+  dtostrf(sensorValue[COLD_WATER], 1, 2, buffer);              ThingSpeak.setField(1,buffer);
+  dtostrf(sensorValue[PRE_HEATED1], 1, 2, buffer);             ThingSpeak.setField(2,buffer);
+  dtostrf(sensorValue[PRE_HEATED2], 1, 2, buffer);             ThingSpeak.setField(3,buffer);
+  dtostrf(sensorValue[HOT_WATER_TANK], 1, 2, buffer);          ThingSpeak.setField(4,buffer);
+  dtostrf(sensorValue[HOT_WATER_USE], 1, 2, buffer);           ThingSpeak.setField(5,buffer);
+  dtostrf(sensorValue[RADIATOR_RETURN_AT], 1, 2, buffer);      ThingSpeak.setField(6,buffer);
+  dtostrf(sensorValue[RADIATOR_RETURN_HP], 1, 2, buffer);      ThingSpeak.setField(7,buffer);
+  dtostrf(sensorValue[HEATING_AT], 1, 2, buffer);              ThingSpeak.setField(8,buffer);
+  // write to the ThingSpeak channel 
+  int x = ThingSpeak.writeFields(channel_id1, api_id1);
+  if(x == 200){
+    Serial.println("Channel update successful.");
+  }
+  else{
+    Serial.println("Problem updating channel. HTTP error code " + String(x));
+  }
+  Serial.println(".");
+  Serial.println("writeValues Set Two:");
+  dtostrf(sensorValue[ACCU_TANK], 1, 2, buffer);            ThingSpeak.setField(1,buffer);
+  dtostrf(sensorValue[RADIATOR_HEAT], 1, 2, buffer);        ThingSpeak.setField(2,buffer);
+  dtostrf(sensorValue[BRINE_HOT], 1, 2, buffer);            ThingSpeak.setField(3,buffer);
+  dtostrf(sensorValue[BRINE_COLD], 1, 2, buffer);           ThingSpeak.setField(4,buffer);
+  dtostrf(sensorValue[OUTDOOR], 1, 2, buffer);              ThingSpeak.setField(5,buffer);
+  dtostrf(Irms, 1, 2, buffer);                              ThingSpeak.setField(6,buffer);
+  int y = ThingSpeak.writeFields(channel_id2, api_id2);
+  if(y == 200){
+    Serial.println("Channel update successful.");
+  }
+  else{
+    Serial.println("Problem updating channel. HTTP error code " + String(y));
+  }
+  Serial.println(".");
+}
+
+// function to print a 1-Wire device address
+void printAddress(DeviceAddress deviceAddress)
+{
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    // zero pad the address if necessary
+    if (deviceAddress[i] < 16) Serial.print("0");
+    Serial.print(deviceAddress[i], HEX);
+  }
+}
+
+void printMacAddress(byte mac[]) {
+  for (int i = 5; i >= 0; i--) {
+    if (mac[i] < 16) {
+      Serial.print("0");
+    }
+    Serial.print(mac[i], HEX);
+    if (i > 0) {
+      Serial.print(":");
+    }
+  }
+  Serial.println();
+}
+
+//==========================================================================================
+//                                setup
+//==========================================================================================
+
+void setup(void) {
+  Serial.begin(9600);
+  if (debug)
+  { while (!Serial) { }
+    ; // wait for serial port to connect, if in debug mode. Needed for native USB port only
+  }
+
+  // initialize digital pin LED_BUILTIN as an output.
+  pinMode(LED_BUILTIN, OUTPUT);
+  
+  Serial.println("Temperature Logger setup:");
+  Serial.print("version: ");
+  Serial.println(VERINFO);
+
+  // initialize the burner pin as an input:
+  pinMode(PUMP_PIN, INPUT_PULLUP);
+
+  // Start up the library
+  sensors.begin();
+  
+  // locate devices on the bus
+  Serial.print("Locating devices...Found ");
+  sensorCount = sensors.getDeviceCount();
+  Serial.print(sensorCount);
+  Serial.println(" devices.");
+
+  // report parasite power requirements
+  Serial.print("Parasite power is: "); 
+  if (sensors.isParasitePowerMode()) Serial.println("ON");
+  else Serial.println("OFF");
+
+  Serial.println("Addresses defined for sensors:");
+  for (int i=0; i <= sensorCount-1; i++){
+    printAddress(sensorAdr[i]);
+    Serial.println();
+  }
+
+  Serial.println("Set the resolution:");
+  for (int i=0; i <= sensorCount-1; i++){
+    sensors.setResolution(sensorAdr[i], TEMPERATURE_PRECISION);
+  }
+
+  Serial.println("Read back the resolution:");
+  for (int i=0; i <= sensorCount-1; i++){
+    Serial.print("Device "); Serial.print(i); Serial.print(" "); printAddress(sensorAdr[i]);
+    Serial.print(" Resolution: ");
+    Serial.print(sensors.getResolution(sensorAdr[i]), DEC); 
+    Serial.println();
+  }
+
+  sensorTime = millis();
+  sendingTime = millis();
+
+  // start the Ethernet connection:
+  Serial.println("  ethernet"); delay(2000);
+  if (Ethernet.begin(mac) == 0) {
+    Serial.println("Failed to configure Ethernet using DHCP");
+    // no point in carrying on, so do nothing forevermore:
+    networkOk = false;
+  }
+  else {
+    Serial.println("Ethernet configured using DHCP");
+    networkOk = true; 
+  }
+
+  // print your local IP address:
+  printIPAddress();
+  dtostrf(77, 2, 1, buffer);
+  sprintf(buffer, "%d.%d.%d.%d\0", Ethernet.localIP()[0], Ethernet.localIP()[1], Ethernet.localIP()[2], Ethernet.localIP()[3]);
+
+  Serial.println("  thingspeak"); delay(300);
+  ThingSpeak.begin(client);
+
+  Serial.println("  1-Wire sensor"); delay(300);
+  read1WireSensors();
+
+  Serial.println("  Emon setup"); delay(300);
+  emon1.current(1, 8);             // Current: input pin, calibration.
+  
+  Serial.print("checking free RAM...");
+  Serial.println(freeRam(), DEC);
+  
+  Serial.println("setup done");
+  delay(1000);
+}
+
+//==========================================================================================
+//                                main loop
+//==========================================================================================
+
+void loop(void)
+{
+  Irms = emon1.calcIrms(1480);  // Calculate Irms only
+
+  if(millis() - sensorTime>SENSOR_DELAY) {              // do sensor reading if it is time for it
+    sensorTime += SENSOR_DELAY;
+    read1WireSensors();
+  }
+
+  pumpState = digitalRead(PUMP_PIN);               // read the state of the burner value. value used in writeValues()
+  
+  if((millis() - sendingTime>SENDING_DELAY) && (networkOk)) { // do logging if it is time for it and network is available
+    sendingTime += SENDING_DELAY;
+    writeValues();
+  }
+  
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= longInterval) {
+    // save the last time you blinked the LED
+    previousMillis = currentMillis;
+    ledState = HIGH;
+    ledCycle = HIGH;
+    digitalWrite(LED_BUILTIN, ledState);
+  }
+
+  if (ledCycle == HIGH) {
+    if (ledState == HIGH) {
+      if (currentMillis - previousMillis >= shortInterval) {
+        ledState = LOW;
+        digitalWrite(LED_BUILTIN, ledState);
+      }
+    }
+    if (ledState == LOW) {
+      if (currentMillis - previousMillis >= 2*shortInterval) {
+        ledState = HIGH;
+        ledCycle = LOW;
+        digitalWrite(LED_BUILTIN, ledState);
+      }
+    }
+  } else {
+    if (ledState == HIGH) {
+      if (currentMillis - previousMillis >= 3*shortInterval) {
+        ledState = LOW;
+        digitalWrite(LED_BUILTIN, ledState);
+      }
+    }
+  }
+}

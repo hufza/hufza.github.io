@@ -1,0 +1,118 @@
+/*  Ethernet/GarasjeD7.ino    Garasje dør betjening via web på hjemmenett.
+  Arduino Nano V3.0 ATmega328 16M 5V CH340G (Arduino Nano, ATmega328)
+  ENC28J60 Ethernet Shield for Arduino Nano
+  Sketch and libraries for IDE version 1.6.7.
+  D5   Relay for car port
+  D8   ENC28J60 CS
+  D11  ENC28J60 SI
+  D12  ENC28J60 SO
+  D13  ENC28J60 SCK
+*/
+// simple starting sketch for using the ethercard to send/receive info over the internet
+// send data to the arduino by adding a command onto the end of the URL   e.g.  HTTP://172.22.139.5/option1  
+
+// libraries
+#include <EtherCard.h>
+
+// variables:
+byte Ethernet::buffer[1000];                  // web page buffer
+int relayPin = 5;                             // pin the Relay is on
+boolean buttonClicked = false;                // store state of web button activity
+boolean relayActivated = false;               // store state of relay activity, true is relayPin set low
+long relayMillis = 0;                         // will store last time relay was turned low
+long interval = 500;                         // interval at which to blink (milliseconds)
+
+// constants
+//#define DEBUG 1                               // debug info via seral link, comment to not show debug text
+static byte myip[] = { 192,168,22,99 };                   // Ethernet IP, default gateway and MAC addresses
+static byte gwip[] = { 192,168,22,9 };                    // Ethernet IP, default gateway and MAC addresses
+static byte mymac[] = { 0x74,0x69,0x69,0x2D,0x31,0x31 };  // Ethernet IP, default gateway and MAC addresses
+
+// declare objects
+BufferFiller bfill;
+
+
+// store html header in flash to save memory
+const char htmlHeader[] PROGMEM = 
+      "HTTP/1.0 503 test page\r\n"
+      "Content-Type: text/html\r\n"
+      "Retry-After: 600\r\n\r\n"
+      "<html><head><title>Bydalsveien 22</title></head>"
+      "<style>h1 { text-align: center; font-size: 500%;} p { text-align: center; font-size: 350%;} </style>"
+      "<body style='background-color:rgb(255,255,102);'>"
+      "<h1 style='text-align: center;'><em><span style='color: rgb(153, 0, 0);'>Garasjeport kontroll</span></em></h1>"
+;
+
+// HTML page to display
+  static word homePage() {
+    bfill = ether.tcpOffset();
+ 
+    // This is html code with embedded variables 
+    //    put variables in the HTML area as $D for a number and $S for text then add the actual values after the comma at the end
+    //
+    // Notes  "<meta http-equiv=refresh content=5>"   tells the page to auto refresh every 5 seconds
+    //        if you increase the size of the HTML code you may need to increase the buffer size (or it will stop working)
+  
+    bfill.emit_p( PSTR ( 
+      "$F<p><em>"    // $F = htmlheader in flash memory
+      "</em></p><div style='text-align: center;'><p><em>"
+      "Trykk p&aring <A HREF='?cmd=off'>KNAPP</A> for &aring styre garasjeport. <br><br>"
+      "Linken over virker p&aring samme m&aringte<br> som knappen p&aring fjernkontrollen. <br><br>"
+      "(Bygget med <A HREF='http://arduino.cc\'>Arduino</A>). <br>"
+      "</em></p></body></html>" 
+    ) , htmlHeader ) ;
+
+    return bfill.position(); 
+
+  }
+
+
+void setup () {
+  pinMode(relayPin, OUTPUT);  
+  digitalWrite(relayPin, HIGH);   // set pin high
+  
+  ether.hisport = 84 ;            // internet port to use (normal = 80)
+  
+  Serial.begin(9600);             // initialize serial:
+
+//  Serial.println("Arduino Ethernet Sketch Started.....");
+
+  // start ethernet
+  if (ether.begin(sizeof Ethernet::buffer, mymac, 10) == 0)
+    Serial.println( "Failed to access Ethernet controller");
+  ether.staticSetup(myip, gwip);
+}
+
+
+void loop () {
+  word len = ether.packetReceive();   // check if anything has come in via ethernet
+  word pos = ether.packetLoop(len);
+  
+  if (pos) {                                            // check if valid tcp data is received
+    char* data = (char *) Ethernet::buffer + pos;
+//    Serial.println("#####data received:");
+//    Serial.println(data);
+    if (strncmp( "GET /?cmd=off" , data , 13 ) == 0) {     // check if "off" command received, and activate pin
+      buttonClicked = true;
+//      Serial.println("off received");
+    }
+    ether.httpServerReply(homePage()); // send web page data
+  }
+
+  if (buttonClicked && !relayActivated) {       // was web button clicked and relay not on?
+//    Serial.println("Web button was clicked, and relay was not on.");
+    buttonClicked = false;
+    digitalWrite(relayPin, LOW);   // set pin 5 low
+    relayActivated = true;
+    relayMillis = millis();
+  }
+  
+  if(millis() - relayMillis > interval && relayActivated) {    // check if it is time to release relay if relay is on
+//    Serial.println("It is time to release relay, and relay was on.");
+    buttonClicked = false;
+    digitalWrite(relayPin, HIGH);    // set pin 5 high
+    relayActivated = false;
+    relayMillis = millis(); 
+  }  
+}
+
